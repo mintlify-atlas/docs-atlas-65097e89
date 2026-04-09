@@ -1,0 +1,570 @@
+---
+title: "Arithmetic operations"
+description: Highway arithmetic operations — add, subtract, multiply, divide, fused multiply-add, rounding, min/max, and type conversions.
+---
+
+Highway arithmetic operations work element-wise: each lane of the result is computed independently from the corresponding lanes of the input(s). Unless noted otherwise, operations apply to all numeric lane types.
+
+Type constraint notation: `{i,f}` means signed integers and floats; `{u,i}` means unsigned and signed integers; `{u,i}{8,16}` means 8-bit and 16-bit unsigned and signed integers; `{f}` means floating-point only.
+
+## Addition and subtraction
+
+### `Add`
+
+```cpp
+V Add(V a, V b)   // also: operator+(V a, V b)
+```
+
+Returns `a[i] + b[i]` (mod 2^bits for integers).
+
+<Note>
+`operator+` is currently unavailable on SVE/RVV. Use `Add` for portable code.
+</Note>
+
+---
+
+### `Sub`
+
+```cpp
+V Sub(V a, V b)   // also: operator-(V a, V b)
+```
+
+Returns `a[i] - b[i]` (mod 2^bits for integers).
+
+<Note>
+`operator-` is currently unavailable on SVE/RVV. Use `Sub` for portable code.
+</Note>
+
+---
+
+### `AddSub`
+
+```cpp
+V AddSub(V a, V b)
+```
+
+Returns `a[i] - b[i]` in even-indexed lanes and `a[i] + b[i]` in odd-indexed lanes. May be more efficient than `OddEven(Add(a, b), Sub(a, b))` on some targets.
+
+---
+
+### `SaturatedAdd`
+
+**Type constraint**: `V`: `{u,i}{8,16}`
+
+```cpp
+V SaturatedAdd(V a, V b)
+```
+
+Returns `a[i] + b[i]` saturated to the minimum or maximum representable value of the lane type.
+
+---
+
+### `SaturatedSub`
+
+**Type constraint**: `V`: `{u,i}{8,16}`
+
+```cpp
+V SaturatedSub(V a, V b)
+```
+
+Returns `a[i] - b[i]` saturated to the minimum or maximum representable value of the lane type.
+
+---
+
+### `AverageRound`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V AverageRound(V a, V b)
+```
+
+Returns `(a[i] + b[i] + 1) >> 1` — the average of two unsigned or signed integer lanes, rounded up.
+
+---
+
+## Negation and absolute value
+
+### `Neg`
+
+**Type constraint**: `V`: `{i,f}`
+
+```cpp
+V Neg(V a)
+```
+
+Returns `-a[i]` in each lane.
+
+---
+
+### `Abs`
+
+**Type constraint**: `V`: `{i,f}`
+
+```cpp
+V Abs(V a)
+```
+
+Returns the absolute value of `a[i]` in each lane. For integers, `LimitsMin()` maps to `LimitsMax() + 1`.
+
+---
+
+### `AbsDiff`
+
+```cpp
+V AbsDiff(V a, V b)
+```
+
+Returns `|a[i] - b[i]|` in each lane.
+
+---
+
+## Multiplication and division
+
+### `Mul`
+
+```cpp
+V Mul(V a, V b)   // also: operator*(V a, V b)
+```
+
+Returns `a[i] * b[i]`, truncated to the lower half for integer inputs.
+
+<Note>
+`operator*` is currently unavailable on SVE/RVV. Use `Mul` for portable code.
+</Note>
+
+---
+
+### `Div`
+
+```cpp
+V Div(V a, V b)   // also: operator/(V a, V b)
+```
+
+Returns `a[i] / b[i]`. For integer vectors, returns an implementation-defined value where `b[i] == 0`. For signed integers, also implementation-defined where `a[i] == LimitsMin<T>() && b[i] == -1`.
+
+<Note>
+`operator/` is currently unavailable on SVE/RVV. Use `Div` for portable code.
+</Note>
+
+---
+
+### `MulHigh`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V MulHigh(V a, V b)
+```
+
+Returns the upper half of the full-width product `a[i] * b[i]` in each lane.
+
+---
+
+### `MulEven`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V2 MulEven(V a, V b)
+```
+
+Returns the double-wide result of `a[i] * b[i]` for every even lane index `i`, placed in lanes `i` (lower half) and `i+1` (upper half). `V2` is a vector with double-width lanes (or the same as `V` for 64-bit inputs, which requires `HWY_TARGET != HWY_SCALAR`).
+
+---
+
+### `MulOdd`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V MulOdd(V a, V b)
+```
+
+Returns the double-wide result of `a[i] * b[i]` for every odd lane index `i`, placed in lanes `i-1` (lower half) and `i` (upper half). Only available if `HWY_TARGET != HWY_SCALAR`.
+
+---
+
+## Fused multiply-add
+
+When implemented with special hardware instructions, FMA operations are more precise and faster than separate multiply and add. The `*Sub` variants are slower on Arm and unavailable for integer inputs.
+
+### `MulAdd`
+
+```cpp
+V MulAdd(V a, V b, V c)
+```
+
+Returns `a[i] * b[i] + c[i]`.
+
+---
+
+### `NegMulAdd`
+
+```cpp
+V NegMulAdd(V a, V b, V c)
+```
+
+Returns `-a[i] * b[i] + c[i]`.
+
+---
+
+### `MulSub`
+
+```cpp
+V MulSub(V a, V b, V c)
+```
+
+Returns `a[i] * b[i] - c[i]`.
+
+---
+
+### `NegMulSub`
+
+```cpp
+V NegMulSub(V a, V b, V c)
+```
+
+Returns `-a[i] * b[i] - c[i]`.
+
+---
+
+## Approximate math
+
+### `ApproximateReciprocal`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V ApproximateReciprocal(V a)
+```
+
+Returns an approximation of `1.0 / a[i]`. The precision varies by platform.
+
+---
+
+### `ApproximateReciprocalSqrt`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V ApproximateReciprocalSqrt(V a)
+```
+
+Returns an approximation of `1.0 / sqrt(a[i])`. Note: `sqrt(a) ≈ ApproximateReciprocalSqrt(a) * a`. x86 and PPC provide ~12-bit approximations; Arm error is closer to 1%.
+
+---
+
+### `Sqrt`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V Sqrt(V a)
+```
+
+Returns `sqrt(a[i])` in each lane.
+
+---
+
+## Floating-point rounding
+
+### `Round`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V Round(V v)
+```
+
+Returns `v[i]` rounded to the nearest integer, with ties going to even.
+
+---
+
+### `Trunc`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V Trunc(V v)
+```
+
+Returns `v[i]` rounded towards zero (truncated).
+
+---
+
+### `Ceil`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V Ceil(V v)
+```
+
+Returns `v[i]` rounded towards positive infinity.
+
+---
+
+### `Floor`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V Floor(V v)
+```
+
+Returns `v[i]` rounded towards negative infinity.
+
+---
+
+## Min and max
+
+<Note>
+Min/Max corner cases are target-specific. If either argument is qNaN: x86 SIMD returns the second argument; Armv7 Neon returns NaN; Wasm is supposed to return NaN but does not always; other targets uphold IEEE 754-2019 minimumNumber semantics.
+</Note>
+
+### `Min`
+
+```cpp
+V Min(V a, V b)
+```
+
+Returns `min(a[i], b[i])` in each lane.
+
+---
+
+### `Max`
+
+```cpp
+V Max(V a, V b)
+```
+
+Returns `max(a[i], b[i])` in each lane.
+
+---
+
+### `Clamp`
+
+```cpp
+V Clamp(V a, V lo, V hi)
+```
+
+Returns `a[i]` clamped to `[lo[i], hi[i]]`.
+
+```cpp
+ScalableTag<float> d;
+auto a  = Iota(d, 0.0f);
+auto lo = Set(d, 2.0f);
+auto hi = Set(d, 5.0f);
+auto r  = Clamp(a, lo, hi);  // {2, 2, 2, 3, 4, 5, 5, 5, ...}
+```
+
+---
+
+## Masked arithmetic
+
+These operations return `no[i]` for lanes where the mask is false, and may suppress floating-point exceptions for those lanes when supported by the ISA.
+
+### `MaskedAddOr`
+
+```cpp
+V MaskedAddOr(V no, M m, V a, V b)
+```
+
+Returns `a[i] + b[i]` or `no[i]` if `m[i]` is false.
+
+---
+
+### `MaskedSubOr`
+
+```cpp
+V MaskedSubOr(V no, M m, V a, V b)
+```
+
+Returns `a[i] - b[i]` or `no[i]` if `m[i]` is false.
+
+---
+
+### `MaskedMulOr`
+
+```cpp
+V MaskedMulOr(V no, M m, V a, V b)
+```
+
+Returns `a[i] * b[i]` or `no[i]` if `m[i]` is false.
+
+---
+
+### `MaskedDivOr`
+
+```cpp
+V MaskedDivOr(V no, M m, V a, V b)
+```
+
+Returns `a[i] / b[i]` or `no[i]` if `m[i]` is false.
+
+---
+
+### `MaskedMinOr`
+
+```cpp
+V MaskedMinOr(V no, M m, V a, V b)
+```
+
+Returns `Min(a, b)[i]` or `no[i]` if `m[i]` is false.
+
+---
+
+### `MaskedMaxOr`
+
+```cpp
+V MaskedMaxOr(V no, M m, V a, V b)
+```
+
+Returns `Max(a, b)[i]` or `no[i]` if `m[i]` is false.
+
+---
+
+### `MaskedMulAddOr`
+
+```cpp
+V MaskedMulAddOr(V no, M m, V mul, V x, V add)
+```
+
+Returns `mul[i] * x[i] + add[i]` or `no[i]` if `m[i]` is false.
+
+---
+
+## Zero-masked arithmetic
+
+These operations return `0` (not `no`) for lanes where the mask is false.
+
+### `MaskedAdd`
+
+```cpp
+V MaskedAdd(M m, V a, V b)
+```
+
+Returns `a[i] + b[i]` or `0` if `m[i]` is false.
+
+---
+
+### `MaskedSub`
+
+```cpp
+V MaskedSub(M m, V a, V b)
+```
+
+Returns `a[i] - b[i]` or `0` if `m[i]` is false.
+
+---
+
+### `MaskedMul`
+
+```cpp
+V MaskedMul(M m, V a, V b)
+```
+
+Returns `a[i] * b[i]` or `0` if `m[i]` is false.
+
+---
+
+### `MaskedDiv`
+
+```cpp
+V MaskedDiv(M m, V a, V b)
+```
+
+Returns `a[i] / b[i]` or `0` if `m[i]` is false.
+
+---
+
+### `MaskedMax`
+
+```cpp
+V MaskedMax(M m, V a, V b)
+```
+
+Returns `Max(a, b)[i]` or `0` if `m[i]` is false.
+
+---
+
+### `MaskedMulAdd`
+
+```cpp
+V MaskedMulAdd(M m, V a, V b, V c)
+```
+
+Returns `a[i] * b[i] + c[i]` or `0` if `m[i]` is false.
+
+---
+
+### `MaskedSqrt`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V MaskedSqrt(M m, V a)
+```
+
+Returns `sqrt(a[i])` where `m[i]` is true, and `0` otherwise.
+
+---
+
+## Type conversion
+
+### `ConvertTo` (integer to float)
+
+**Constraint**: `D`: `{f}`
+
+```cpp
+Vec<D> ConvertTo(D d, V v)
+```
+
+Converts each signed or unsigned integer lane to the same-sized floating-point type.
+
+---
+
+### `ConvertTo` (float to integer)
+
+**Constraint**: `V`: `{f}`
+
+```cpp
+Vec<D> ConvertTo(D d, V v)
+```
+
+Rounds each floating-point lane towards zero and converts to the same-sized signed or unsigned integer. Returns the closest representable value if the input exceeds the destination range.
+
+---
+
+### `PromoteTo`
+
+```cpp
+Vec<D> PromoteTo(D d, V part)
+```
+
+Promotes a half-vector `part` to a full vector of a wider type. Supports unsigned to wider signed/unsigned, signed to wider signed, `f16`→`f32`, `f16`→`f64`, `bf16`→`f32`, `f32`→`f64`, and `{u,i}32`→`f64`.
+
+```cpp
+ScalableTag<float> df;
+Half<decltype(df)> dh;
+auto halfw = /* Vec<Half<...>> of float16_t */;
+auto full  = PromoteTo(df, halfw);  // widened to float32
+```
+
+---
+
+### `DemoteTo`
+
+```cpp
+Vec<D> DemoteTo(D d, V v)
+```
+
+Demotes a full vector to a narrower type with saturation. Supports a wide set of integer and floating-point combinations. See the quick reference for the full support matrix.
+
+```cpp
+ScalableTag<int32_t> di32;
+Rebind<int16_t, decltype(di32)> di16;
+auto v   = Set(di32, 70000);
+auto dem = DemoteTo(di16, v);  // saturated to 32767
+```

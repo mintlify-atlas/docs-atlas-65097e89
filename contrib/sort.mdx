@@ -1,0 +1,149 @@
+---
+title: "VQSort — vectorized sort"
+description: "Highway's vectorized quicksort for integers and floats, faster than std::sort"
+---
+
+VQSort is a vectorized, in-place quicksort that dispatches to the best available
+SIMD instruction set at runtime. It sorts large arrays of built-in types roughly
+ten times faster than LLVM's `std::sort`. See the
+[paper](https://arxiv.org/abs/2205.05982) and
+[blog post](https://opensource.googleblog.com/2022/06/Vectorized%20and%20performance%20portable%20Quicksort.html)
+for full benchmarks.
+
+## Include
+
+```cpp
+#include "hwy/contrib/sort/vqsort.h"
+```
+
+`vqsort.h` provides dynamically-dispatched overloads in the `hwy` namespace.
+The header automatically includes `hwy/contrib/sort/order.h`, which defines the
+`SortAscending` and `SortDescending` tag types.
+
+## Supported types
+
+| Category | Types |
+|---|---|
+| Unsigned integers | `uint16_t`, `uint32_t`, `uint64_t` |
+| Signed integers | `int16_t`, `int32_t`, `int64_t` |
+| Floating point | `float16_t` (requires `hwy::HaveFloat16()`), `float`, `double` (requires `hwy::HaveFloat64()`) |
+| 128-bit | `uint128_t`, `K64V64`, `K32V32` |
+
+`K64V64` and `K32V32` are key-value pair types. The sort key is the upper half of
+the 128-bit value; the associated value travels with its key during sorting.
+
+## Sort order
+
+Pass one of these tag types as the last argument to any VQ function:
+
+```cpp
+hwy::SortAscending   // sort from smallest to largest
+hwy::SortDescending  // sort from largest to smallest
+```
+
+## Full sort — `VQSort`
+
+Sorts `keys[0, n)` in place. Does not preserve the relative order of equivalent
+keys (i.e., it is not stable). Dispatches to the best available instruction set.
+Does not allocate heap memory; uses roughly 1.2 KiB of stack and a 3-word
+thread-local cache for random state.
+
+```cpp
+void VQSort(T* HWY_RESTRICT keys, size_t n, Order);
+```
+
+**Supported overloads:** `uint16_t`, `uint32_t`, `uint64_t`, `int16_t`,
+`int32_t`, `int64_t`, `float16_t`, `float`, `double`, `uint128_t`, `K64V64`,
+`K32V32`.
+
+```cpp
+#include "hwy/contrib/sort/vqsort.h"
+
+void SortExample() {
+  std::vector<int32_t> data = {5, 3, 8, 1, 9, 2, 7, 4, 6};
+  hwy::VQSort(data.data(), data.size(), hwy::SortAscending());
+  // data is now {1, 2, 3, 4, 5, 6, 7, 8, 9}
+
+  // Sort descending
+  hwy::VQSort(data.data(), data.size(), hwy::SortDescending());
+  // data is now {9, 8, 7, 6, 5, 4, 3, 2, 1}
+}
+```
+
+### Key-value pairs
+
+Use `K32V32` (32-bit key + 32-bit value) or `K64V64` (64-bit key + 64-bit
+value) to sort associated data alongside keys:
+
+```cpp
+#include "hwy/contrib/sort/vqsort.h"
+
+void SortPairsExample() {
+  // K64V64: the upper 64 bits are the sort key, lower 64 bits are the payload.
+  std::vector<hwy::K64V64> pairs = { /* ... */ };
+  hwy::VQSort(pairs.data(), pairs.size(), hwy::SortAscending());
+}
+```
+
+## Partial sort — `VQPartialSort`
+
+Rearranges elements so that `keys[0, k)` contains the sorted first `k` smallest
+(or largest, when using `SortDescending`) elements of `keys[0, n)`. The
+remaining elements in `[k, n)` are in unspecified order.
+
+```cpp
+void VQPartialSort(T* HWY_RESTRICT keys, size_t n, size_t k, Order);
+```
+
+```cpp
+// Put the 10 smallest elements in sorted order at the front.
+hwy::VQPartialSort(data.data(), data.size(), 10, hwy::SortAscending());
+```
+
+For 128-bit types, both `n` and `k` are counted in units of the 128-bit element.
+
+## Quickselect — `VQSelect`
+
+Rearranges elements so that `keys[k]` holds whatever value would appear at
+position `k` in a fully sorted array, and all elements before position `k` are
+less than or equal to all elements after it. Equivalent to `std::nth_element`.
+
+```cpp
+void VQSelect(T* HWY_RESTRICT keys, size_t n, size_t k, Order);
+```
+
+```cpp
+// Place the median element at index n/2.
+hwy::VQSelect(data.data(), data.size(), data.size() / 2, hwy::SortAscending());
+float median = data[data.size() / 2];
+```
+
+## Legacy `Sorter` class
+
+An older `hwy::Sorter` class exists for binary compatibility. It now simply
+calls `VQSort` internally. Prefer the free functions above for new code.
+
+## Performance guidance
+
+<Note>
+VQSort is designed for arrays of at least 100 KiB. For smaller inputs, the
+overhead of wide SIMD (e.g. AVX-512 startup) can reduce the effective speedup.
+If the surrounding application already uses SIMD, this threshold is largely
+irrelevant because the CPU stays in its high-performance state.
+</Note>
+
+Benchmarks on a Xeon 6154 (AVX-512) at 3 GHz:
+
+| Algorithm | Type | Distribution | N | Throughput |
+|---|---|---|---|---|
+| `std::sort` | `float` | uniform | 1M | 54 MB/s |
+| `VQSort` | `float` | uniform | 1M | 1143 MB/s |
+
+VQSort is also about 1.4x faster than Intel's `x86-simd-sort` and `vxsort`
+across a range of input sizes and types.
+
+## Static dispatch variant
+
+If you do not want dynamic dispatch or `DLLEXPORT` linkage, define
+`VQSORT_ONLY_STATIC` and call `VQSortStatic` from `vqsort-inl.h` inside your
+`HWY_NAMESPACE`. This is an advanced use case; see the header for details.

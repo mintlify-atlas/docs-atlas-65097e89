@@ -1,0 +1,120 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Highway",
+  "projectDescription": "A C++ SIMD library providing performance-portable, length-agnostic vector intrinsics with runtime dispatch across 27 CPU targets.",
+  "theme": "aspen",
+  "primaryColor": "#242b2c",
+  "lightColor": null,
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/vector-types",
+              "concepts/dispatch",
+              "concepts/targets"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/loop-vectorization",
+              "guides/dynamic-dispatch",
+              "guides/compiler-flags",
+              "guides/porting-intrinsics"
+            ]
+          },
+          {
+            "group": "Contrib Modules",
+            "pages": [
+              "contrib/sort",
+              "contrib/math",
+              "contrib/algo",
+              "contrib/image",
+              "contrib/thread-pool"
+            ]
+          },
+          {
+            "group": "Resources",
+            "pages": [
+              "resources/design-philosophy",
+              "resources/faq",
+              "resources/release-testing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview",
+              "api/headers"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "api/ops/initialization",
+              "api/ops/arithmetic",
+              "api/ops/logical",
+              "api/ops/memory",
+              "api/ops/comparison",
+              "api/ops/swizzle",
+              "api/ops/reduction"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Runtime CPU dispatch — selects the best available SIMD instruction set at runtime",
+    "27 targets across x86 (SSE2 through AVX-512), ARM (NEON/SVE/SVE2), RISC-V, POWER, IBM Z, and WebAssembly",
+    "Single source code compiles for all targets via foreach_target.h and HWY_DYNAMIC_DISPATCH",
+    "Length-agnostic (scalable) vectors: works with both fixed-width and scalable architectures (SVE, RVV)",
+    "Zero-overhead abstraction: ops map directly to CPU instructions without compiler guesswork",
+    "Contrib library: vectorized sort (VQSort), math functions, image utilities, dot products, and more",
+    "C++17 compatible, supports GCC, Clang, MSVC, and ICC"
+  ],
+  "publicApiSurface": [
+    "hwy/highway.h — main include for all SIMD ops",
+    "hwy/foreach_target.h — enables multi-target compilation for dynamic dispatch",
+    "hwy/base.h — compiler/platform definitions without full SIMD",
+    "hwy/aligned_allocator.h — AllocateAligned<T>, FreeAlignedBytes",
+    "hwy/cache_control.h — prefetch and cache control functions",
+    "hwy/nanobenchmark.h — precise benchmarking utilities",
+    "HWY_DYNAMIC_DISPATCH(func)(args) — call best available implementation at runtime",
+    "HWY_STATIC_DISPATCH(func)(args) — call single statically compiled implementation",
+    "HWY_EXPORT(func) — generate dispatch table for a function",
+    "ScalableTag<T> / HWY_FULL(T) — tag for full-width scalable vectors",
+    "CappedTag<T, N> / HWY_CAPPED(T, N) — tag for vectors with at most N lanes",
+    "FixedTag<T, N> — tag for exactly N-lane vectors",
+    "Zero(d), Set(d, val), Iota(d, start) — vector initialization",
+    "Load(d, ptr), Store(v, d, ptr), LoadU, StoreU — memory operations",
+    "Add, Sub, Mul, Div, MulAdd, NegMulAdd — arithmetic",
+    "And, Or, Xor, Not, AndNot — bitwise logic",
+    "Eq, Ne, Lt, Le, Gt, Ge — comparison ops returning masks",
+    "IfThenElse(mask, yes, no) — conditional select",
+    "ShiftLeft<N>(v), ShiftRight<N>(v) — bit shifts",
+    "TableLookupBytes, Shuffle* — permutation/swizzle ops",
+    "SumOfLanes(d, v), MinOfLanes, MaxOfLanes — horizontal reductions",
+    "hwy/contrib/sort/vqsort.h — VQSort vectorized quicksort",
+    "hwy/contrib/math/math-inl.h — Sin, Cos, Exp, Log, Atan2, etc.",
+    "hwy/contrib/algo/transform-inl.h — Transform, Generate, FindIf"
+  ]
+}

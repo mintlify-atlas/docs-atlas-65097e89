@@ -1,0 +1,184 @@
+---
+title: "Thread pool"
+description: "Parallel task execution for SIMD workloads using Highway's thread pool"
+---
+
+`ThreadPool` is a highly efficient parallel-for implementation designed for
+workloads with many short fork-join regions — thousands of calls distributing
+work across a few dozen threads. It avoids heap allocation per task and uses
+a lock-free design that minimizes scheduling overhead.
+
+## Include
+
+```cpp
+#include "hwy/contrib/thread_pool/thread_pool.h"
+```
+
+## Construction
+
+```cpp
+// Spawn num_threads additional worker threads.
+// The main thread also participates in work, so total workers = num_threads + 1.
+hwy::ThreadPool pool(num_threads);
+
+// Query a reasonable thread count for the current machine:
+size_t max = hwy::ThreadPool::MaxThreads();
+hwy::ThreadPool pool(max);
+```
+
+`MaxThreads()` returns the number of logical processors minus one (one slot is
+reserved for the main thread). It respects `cgroups`, `numactl`, and `taskset`
+restrictions on Linux.
+
+The pool clamped `num_threads` to an internal maximum of 127 worker threads.
+
+## Running tasks — `Run`
+
+```cpp
+template <class Closure>
+void Run(uint64_t begin, uint64_t end, const Closure& closure);
+```
+
+Runs `closure(task, worker)` for every integer `task` in `[begin, end)`. The
+`worker` argument is the index of the worker executing that task (in
+`[0, NumWorkers())`). Tasks may run in any order and on any worker.
+
+```cpp
+pool.Run(0, num_tasks, [&](uint64_t task, size_t worker) {
+  ProcessChunk(task, worker);
+});
+```
+
+<Note>
+`Run` is not thread-safe with respect to itself. Do not call `Run` on the same
+pool concurrently from multiple threads unless `NumWorkers() == 1` or the range
+has at most one task.
+</Note>
+
+### With caller tracking (optional)
+
+A second overload accepts a `pool::Caller` token for profiling:
+
+```cpp
+static hwy::pool::Caller kCaller = hwy::ThreadPool::AddCaller("MyWork");
+pool.Run(0, num_tasks, kCaller, [&](uint64_t task, size_t worker) {
+  ProcessChunk(task, worker);
+});
+```
+
+Call `ThreadPool::AddCaller` once (e.g., as a static or at startup) and reuse
+the token across calls.
+
+## Worker count
+
+```cpp
+size_t hwy::ThreadPool::NumWorkers() const;
+```
+
+Returns `num_threads + 1` — the total number of workers including the main
+thread. Use this to allocate per-worker scratch buffers:
+
+```cpp
+std::vector<ScratchBuffer> scratch(pool.NumWorkers());
+pool.Run(0, num_tasks, [&](uint64_t task, size_t worker) {
+  ProcessWithScratch(task, scratch[worker]);
+});
+```
+
+## Work partitioning strategy
+
+`ThreadPool` divides the task range `[begin, end)` evenly across workers at the
+start of each `Run` call. For ranges with more tasks than workers, it uses
+**work stealing**: idle workers take tasks from still-busy workers in randomized
+order, which bounds imbalance without requiring a global queue or atomic
+read-modify-write operations.
+
+For fewer tasks than workers (the common case when each task is a large loop),
+each worker gets at most one task — no stealing is needed.
+
+## Wait mode
+
+By default, idle workers block on a futex (low power, but higher wake latency).
+Switch to spinning when `Run` is called frequently and latency matters:
+
+```cpp
+pool.SetWaitMode(hwy::PoolWaitMode::kSpin);   // spin-wait
+pool.SetWaitMode(hwy::PoolWaitMode::kBlock);  // futex (default)
+```
+
+Highway also auto-tunes the internal spin policy during the first several `Run`
+calls. Call `pool.AutoTuneComplete()` to check whether tuning has finished.
+
+## Combining thread and SIMD parallelism
+
+The typical pattern is for each task to process a range of rows or elements
+using Highway SIMD intrinsics:
+
+```cpp
+#include "hwy/contrib/thread_pool/thread_pool.h"
+#include "hwy/highway.h"
+#include "hwy/foreach_target.h"
+
+HWY_BEFORE_NAMESPACE();
+namespace hwy {
+namespace HWY_NAMESPACE {
+
+void ProcessRowsSIMD(const float* src, float* dst, size_t width) {
+  const ScalableTag<float> d;
+  const size_t N = Lanes(d);
+  for (size_t x = 0; x + N <= width; x += N) {
+    StoreU(Sqrt(d, LoadU(d, src + x)), d, dst + x);
+  }
+  // scalar tail ...
+}
+
+}  // namespace HWY_NAMESPACE
+}  // namespace hwy
+HWY_AFTER_NAMESPACE();
+
+// In non-target code:
+void ProcessImage(const float* src, float* dst,
+                  size_t width, size_t height,
+                  hwy::ThreadPool& pool) {
+  pool.Run(0, static_cast<uint64_t>(height),
+           [&](uint64_t row, size_t /*worker*/) {
+             ProcessRowsSIMD(src + row * width, dst + row * width, width);
+           });
+}
+```
+
+## Thread safety
+
+- Constructing and destroying `ThreadPool` is safe from any single thread.
+- `Run` may only be called from the thread that constructed the pool (or any
+  single thread, as long as calls do not overlap).
+- The closure passed to `Run` is called from multiple threads concurrently;
+  all shared mutable state accessed inside the closure requires synchronization.
+
+## Other contrib modules
+
+The following contrib modules exist but do not have dedicated pages:
+
+<CardGroup cols={2}>
+  <Card title="hwy/contrib/dot/" icon="calculator">
+    `Dot::Compute` — vectorized dot product for `float`, `double`, `bfloat16`,
+    and `int16` inputs. Supports assumptions (`kAtLeastOneVector`,
+    `kMultipleOfVector`, `kPaddedToVector`) to remove unnecessary remainder
+    handling.
+  </Card>
+  <Card title="hwy/contrib/matvec/" icon="table">
+    `MatVec` and `MatVecAdd` — matrix-vector multiply for `T×T→T` and
+    `bfloat16×float→float` layouts. Uses `ThreadPool` internally and applies
+    software write-combining to avoid cache pollution.
+  </Card>
+  <Card title="hwy/contrib/random/" icon="shuffle">
+    `VectorXoshiro` and `CachedXoshiro` — SIMD-parallel xoshiro256** PRNG.
+    Generates multiple independent streams (one per SIMD lane), with `Jump()`
+    support for non-overlapping parallel sequences. Also provides `Uniform()`
+    for `[0, 1)` double output.
+  </Card>
+  <Card title="hwy/contrib/bit_pack/ & unroller/" icon="box">
+    `bit_pack` — utilities for packing narrow integers into packed bit arrays.
+    `unroller` — helpers for explicit loop unrolling patterns.
+  </Card>
+</CardGroup>

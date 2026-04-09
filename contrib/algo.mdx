@@ -1,0 +1,245 @@
+---
+title: "Algorithm utilities"
+description: "Higher-level SIMD algorithms: Transform, Generate, Find, Copy, Fill, and more"
+---
+
+The `algo` contrib module provides higher-level SIMD algorithms that handle
+loop-remainder logic automatically. You do not need to write a main loop plus a
+scalar tail — each function takes care of both internally using `LoadN`/`StoreN`
+for the final partial vector.
+
+All functions are `-inl.h` headers and must be included inside a Highway
+namespace block.
+
+## Headers
+
+| Header | Functions |
+|---|---|
+| `hwy/contrib/algo/transform-inl.h` | `Generate`, `Foreach`, `Transform`, `Transform1`, `Transform2`, `Replace`, `ReplaceIf` |
+| `hwy/contrib/algo/find-inl.h` | `Find`, `FindIf` |
+| `hwy/contrib/algo/copy-inl.h` | `Fill`, `Copy`, `CopyIf` |
+| `hwy/contrib/algo/minmax-inl.h` | `MinValue`, `MaxValue` |
+
+## Lambda syntax
+
+All functions accept a generic lambda (C++14) or a functor with a templated
+`operator()`. Because Clang requires a target attribute on lambdas that call
+Highway intrinsics, place `HWY_ATTR` before the opening brace:
+
+```cpp
+[](auto d, const auto v) HWY_ATTR { return Neg(d, v); }
+```
+
+The `d` argument is the same descriptor that was passed to the algorithm
+function.
+
+## Transform functions
+
+### `Transform`
+
+Replaces each `inout[i]` with `func(d, inout[i])`.
+
+```cpp
+template <class D, class Func, typename T = TFromD<D>>
+void Transform(D d, T* HWY_RESTRICT inout, size_t count, const Func& func);
+```
+
+Example — negate every element in place:
+
+```cpp
+const ScalableTag<float> d;
+Transform(d, data, count,
+          [](auto d, const auto v) HWY_ATTR { return Neg(d, v); });
+```
+
+### `Transform1`
+
+Replaces each `inout[i]` with `func(d, inout[i], in1[i])`.
+
+```cpp
+template <class D, class Func, typename T = TFromD<D>>
+void Transform1(D d, T* HWY_RESTRICT inout, size_t count,
+                const T* HWY_RESTRICT in1, const Func& func);
+```
+
+Example — SAXPY (`x = alpha * x + y`):
+
+```cpp
+const ScalableTag<float> d;
+const float alpha = 2.0f;
+// x = alpha * x + y
+Transform1(d, x, n, y,
+           [alpha](auto d, const auto v, const auto v1) HWY_ATTR {
+             return MulAdd(Set(d, alpha), v, v1);
+           });
+```
+
+### `Transform2`
+
+Replaces each `inout[i]` with `func(d, inout[i], in1[i], in2[i])`. Useful for
+fused multiply-add across three arrays.
+
+```cpp
+template <class D, class Func, typename T = TFromD<D>>
+void Transform2(D d, T* HWY_RESTRICT inout, size_t count,
+                const T* HWY_RESTRICT in1, const T* HWY_RESTRICT in2,
+                const Func& func);
+```
+
+```cpp
+// inout[i] = inout[i] * in1[i] + in2[i]
+Transform2(d, inout, count, in1, in2,
+           [](auto d, const auto v, const auto v1, const auto v2) HWY_ATTR {
+             return MulAdd(v, v1, v2);
+           });
+```
+
+### `Replace` and `ReplaceIf`
+
+Replace all occurrences of a specific value, or conditionally based on a
+predicate:
+
+```cpp
+// Replace every old_t with new_t
+template <class D, typename T = TFromD<D>>
+void Replace(D d, T* HWY_RESTRICT inout, size_t count, T new_t, T old_t);
+
+// Replace elements for which func(d, v) returns a true mask
+template <class D, class Func, typename T = TFromD<D>>
+void ReplaceIf(D d, T* HWY_RESTRICT inout, size_t count, T new_t,
+               const Func& func);
+```
+
+## Generate
+
+Fills `out[0, count)` using `func(d, index_vec)`, where `index_vec` is a vector
+of ascending indices starting at 0 and incrementing by `Lanes(d)`:
+
+```cpp
+template <class D, class Func, typename T = TFromD<D>>
+void Generate(D d, T* HWY_RESTRICT out, size_t count, const Func& func);
+```
+
+```cpp
+// Fill with 0, 1, 2, 3, ... (as floats)
+const ScalableTag<float> d;
+Generate(d, out, count,
+         [](auto d, const auto idx) HWY_ATTR {
+           return ConvertTo(d, idx);
+         });
+```
+
+## Foreach
+
+Calls `func(d, v)` for each vector-width chunk of `in`, substituting a
+user-supplied `no` vector for out-of-bounds lanes:
+
+```cpp
+template <class D, class Func, typename T = TFromD<D>>
+void Foreach(D d, const T* HWY_RESTRICT in, size_t count,
+             const Vec<D> no, const Func& func);
+```
+
+## Find functions
+
+### `Find`
+
+Returns the index of the first element equal to `value` in `in[0, count)`, or
+`count` if not found.
+
+```cpp
+template <class D, typename T = TFromD<D>>
+size_t Find(D d, T value, const T* HWY_RESTRICT in, size_t count);
+```
+
+```cpp
+const ScalableTag<int32_t> d;
+size_t pos = hwy::HWY_NAMESPACE::Find(d, 42, data, count);
+if (pos < count) { /* found at pos */ }
+```
+
+### `FindIf`
+
+Returns the index of the first element for which `func(d, vec)` returns a true
+mask, or `count` if none:
+
+```cpp
+template <class D, class Func, typename T = TFromD<D>>
+size_t FindIf(D d, const T* HWY_RESTRICT in, size_t count, const Func& func);
+```
+
+```cpp
+// Find first negative value
+size_t pos = FindIf(d, data, count,
+                    [](auto d, const auto v) HWY_ATTR {
+                      return Lt(v, Zero(d));
+                    });
+```
+
+## Copy functions
+
+### `Fill`
+
+Fills `to[0, count)` with `value`:
+
+```cpp
+template <class D, typename T = TFromD<D>>
+void Fill(D d, T value, size_t count, T* HWY_RESTRICT to);
+```
+
+### `Copy`
+
+Copies `from[0, count)` to `to`. The two arrays must not overlap:
+
+```cpp
+template <class D, typename T = TFromD<D>>
+void Copy(D d, const T* HWY_RESTRICT from, size_t count, T* HWY_RESTRICT to);
+```
+
+### `CopyIf`
+
+Appends elements from `from[0, count)` to `to` for which `func(d, v)` returns
+true. Returns an STL-style end pointer:
+
+```cpp
+template <class D, class Func, typename T = TFromD<D>>
+T* CopyIf(D d, const T* HWY_RESTRICT from, size_t count, T* HWY_RESTRICT to,
+          const Func& func);
+```
+
+<Note>
+`CopyIf` is only supported for 16-, 32-, and 64-bit element types, because it
+uses `CompressBlendedStore` internally.
+</Note>
+
+```cpp
+// Collect all positive values
+float* end = CopyIf(d, src, count, dst,
+                    [](auto d, const auto v) HWY_ATTR {
+                      return Gt(v, Zero(d));
+                    });
+size_t num_positive = end - dst;
+```
+
+## MinValue and MaxValue
+
+Returns the minimum or maximum scalar value across all elements of
+`in[0, count)`. Uses 4-way unrolled accumulation for throughput:
+
+```cpp
+template <class D, typename T = TFromD<D>>
+T MinValue(D d, const T* HWY_RESTRICT in, size_t count);
+
+template <class D, typename T = TFromD<D>>
+T MaxValue(D d, const T* HWY_RESTRICT in, size_t count);
+```
+
+Returns `PositiveInfOrHighestValue<T>()` from `MinValue` and
+`NegativeInfOrLowestValue<T>()` from `MaxValue` when `count == 0`.
+
+## Remainder handling
+
+All functions in this module handle non-vector-multiple lengths automatically.
+If your data is already aligned and padded to a vector multiple, you can write a
+direct loop with `Load`/`Store` for better performance — the `Transform*` and
+`Copy` variants are designed for the common case where padding is not guaranteed.

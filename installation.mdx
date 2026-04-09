@@ -1,0 +1,154 @@
+---
+title: "Installation"
+description: "How to add Highway to your C++ project"
+---
+
+Highway is available through several package managers, or you can build it from source. Choose the method that best fits your workflow.
+
+<Steps>
+
+<Step title="Install via package manager">
+
+The fastest way to get Highway is through your system package manager or a C++ package manager.
+
+<Tabs>
+  <Tab title="apt (Debian/Ubuntu)">
+    ```bash
+    sudo apt install libhwy-dev
+    ```
+  </Tab>
+  <Tab title="vcpkg">
+    ```bash
+    vcpkg install highway
+    ```
+
+    The Highway port in vcpkg is maintained by Microsoft team members and community contributors. If the version is out of date, open an issue on the [vcpkg repository](https://github.com/Microsoft/vcpkg).
+  </Tab>
+  <Tab title="conda-forge">
+    ```bash
+    conda install -c conda-forge highway
+    ```
+  </Tab>
+</Tabs>
+
+Highway is also available in alpinelinux, FreeBSD, NetBSD, openSUSE, MSYS2, and others. See [repology.org](https://repology.org/project/highway-simd-library/versions) for the full list.
+
+</Step>
+
+<Step title="Integrate with your build system">
+
+After installation, link Highway into your project.
+
+<Tabs>
+  <Tab title="CMake (find_package)">
+    Use this approach when Highway is installed system-wide or via vcpkg:
+
+    ```cmake
+    find_package(HWY 1.3.0 REQUIRED)
+
+    target_link_libraries(your_project PRIVATE hwy)
+    ```
+  </Tab>
+  <Tab title="CMake (add_subdirectory)">
+    Use this approach when Highway is included in your source tree (e.g., as a Git submodule):
+
+    ```cmake
+    add_subdirectory(highway)
+
+    target_link_libraries(your_project PRIVATE hwy)
+    ```
+  </Tab>
+  <Tab title="Bazel">
+    Reference the Highway target from your `BUILD` file:
+
+    ```python
+    cc_binary(
+        name = "your_binary",
+        srcs = ["your_file.cc"],
+        deps = ["//path/to/highway:hwy"],
+    )
+    ```
+  </Tab>
+</Tabs>
+
+</Step>
+
+<Step title="Add as a Git submodule (optional)">
+
+If you manage dependencies as Git submodules, add the following to your `.gitmodules` file:
+
+```
+[submodule "highway"]
+    path = highway
+    url = https://github.com/google/highway
+```
+
+Then run:
+
+```bash
+git submodule update --init
+```
+
+Anyone who clones your repository with `git clone --recursive` will also get Highway automatically.
+
+</Step>
+
+<Step title="Build from source (optional)">
+
+To build Highway as a shared or static library, use the standard CMake workflow:
+
+```bash
+sudo apt install cmake
+mkdir -p build && cd build
+cmake ..
+make -j && make test
+```
+
+On Windows, use `run_tests.bat` instead of `make test`.
+
+<Note>
+Highway's unit tests use [googletest](https://github.com/google/googletest). By default, CMake downloads this dependency at configuration time. To use a system-installed version instead, set `HWY_SYSTEM_GTEST=ON`.
+</Note>
+
+</Step>
+
+</Steps>
+
+## CMake options
+
+The following CMake cache variables control the build:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `HWY_SYSTEM_GTEST` | `OFF` | Use a pre-installed googletest instead of downloading it. Requires `sudo apt install libgtest-dev` or equivalent. |
+| `HWY_TEST_STANDALONE` | `OFF` (MSVC: `ON`) | Disable the googletest dependency entirely for tests. Set `-DHWY_TEST_STANDALONE=1` and remove `gtest_main` references from BUILD files. |
+| `BUILD_SHARED_LIBS` | `OFF` | Build Highway as a shared library instead of a static library. |
+| `HWY_ENABLE_CONTRIB` | `ON` | Include the `contrib/` modules (sort, math, algo, image, thread pool). |
+| `HWY_ENABLE_EXAMPLES` | `ON` | Build the example programs. |
+| `HWY_ENABLE_TESTS` | `ON` | Build and enable CTest tests. |
+| `HWY_WARNINGS_ARE_ERRORS` | `OFF` | Add `-Werror` (or `/WX` on MSVC). Useful in CI. |
+
+## Special build configurations
+
+**ARMv7.** A limitation of current compilers requires an extra flag when targeting ARMv7:
+
+```bash
+cmake -DHWY_CMAKE_ARM7:BOOL=ON ..
+```
+
+**RISC-V RVV.** Highway compiles the entire codebase with `-march=rv<XLEN>gcv1p0` when `HWY_CMAKE_RVV=ON` (the default). With Clang 19+, RVV is also available via runtime dispatch without this flag.
+
+**32-bit x86.** Building on 32-bit x86 is not officially supported. AVX2/3 are disabled by default. If you need them, pass `-m32` and architecture-specific flags.
+
+**Cross-compiled tests.** Running cross-compiled tests requires OS support. On Debian, install the `qemu-user-binfmt` package.
+
+## Compiler flags
+
+Always compile with optimizations enabled. Without inlining, SIMD code may be 10–100× slower:
+
+- GCC and Clang: use `-O2` or higher
+- MSVC: use `/Gv` to pass vector arguments in registers; add `/arch:AVX2` if you use AVX2 with half-width vectors
+
+<Warning>
+Do not use `-ffast-math`. It removes IEEE-754 guarantees about NaN and can reorder operations, introducing subtle correctness bugs in SIMD code.
+</Warning>

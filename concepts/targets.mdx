@@ -1,0 +1,184 @@
+---
+title: "Supported targets"
+description: All 27 CPU targets supported by Highway and how to control which ones are used.
+---
+
+A **target** in Highway is an instruction set — a named cluster of CPU features that can be compiled and dispatched to as a unit. Highway supports 27 targets across 7 platforms. At runtime, Highway selects the best available target for the current CPU.
+
+## Full target list
+
+<AccordionGroup>
+  <Accordion title="Any platform — EMU128, SCALAR">
+    | Target | Description |
+    |---|---|
+    | `EMU128` | Emulated 128-bit vectors using two 64-bit scalar values. The preferred fallback on targets with no SIMD. |
+    | `SCALAR` | Single-lane scalar fallback. Always available; used as a last resort. |
+
+    `EMU128` is preferred over `SCALAR` when neither is disabled, because it provides 128-bit width with reasonable performance.
+  </Accordion>
+
+  <Accordion title="ARM — NEON, SVE, SVE2">
+    | Target | Description |
+    |---|---|
+    | `NEON_WITHOUT_AES` | Armv7+ NEON without AES instructions. |
+    | `NEON` | Armv8 NEON (64-bit) including AES and CLMUL. |
+    | `NEON_BF16` | NEON plus float16, dot product, and bfloat16 extensions. |
+    | `SVE` | Scalable Vector Extension (scalable width). |
+    | `SVE2` | SVE2 (additional operations over SVE). |
+    | `SVE_256` | SVE configured to 256-bit fixed width. |
+    | `SVE2_128` | SVE2 configured to 128-bit fixed width. |
+
+    SVE and SVE2 use scalable (runtime-determined) vector lengths. `SVE_256` and `SVE2_128` opt into fixed widths for compatibility with code that requires a fixed lane count.
+  </Accordion>
+
+  <Accordion title="IBM Z — Z14, Z15">
+    | Target | Description |
+    |---|---|
+    | `Z14` | IBM z/Architecture z14 SIMD (Vector Facility extensions). |
+    | `Z15` | IBM z15 SIMD with additional instructions. |
+  </Accordion>
+
+  <Accordion title="LoongArch — LSX, LASX">
+    | Target | Description |
+    |---|---|
+    | `LSX` | LoongArch SIMD Extension (128-bit). |
+    | `LASX` | LoongArch Advanced SIMD Extension (256-bit). |
+  </Accordion>
+
+  <Accordion title="POWER — PPC8, PPC9, PPC10">
+    | Target | Description |
+    |---|---|
+    | `PPC8` | POWER ISA v2.07 (VSX). |
+    | `PPC9` | POWER ISA v3.0. |
+    | `PPC10` | POWER ISA v3.1B. Not yet fully supported due to compiler bugs; also requires QEMU 7.2 for testing. See [#1207](https://github.com/google/highway/issues/1207). |
+  </Accordion>
+
+  <Accordion title="RISC-V — RVV">
+    | Target | Description |
+    |---|---|
+    | `RVV` | RISC-V Vector Extension 1.0. Scalable vectors; vectors are sizeless built-in types. |
+  </Accordion>
+
+  <Accordion title="WebAssembly — WASM, WASM_EMU256">
+    | Target | Description |
+    |---|---|
+    | `WASM` | WebAssembly SIMD (128-bit). |
+    | `WASM_EMU256` | Emulated 256-bit vectors via 2× unrolled 128-bit WASM SIMD. Enable by defining `HWY_WANT_WASM2`. |
+  </Accordion>
+
+  <Accordion title="x86 — SSE2 through AVX10">
+    | Target | Description |
+    |---|---|
+    | `SSE2` | SSE2 (Pentium 4+). Baseline for 64-bit x86. |
+    | `SSSE3` | Supplemental SSE3 (~Intel Core). |
+    | `SSE4` | SSE4.1/4.2 (~Nehalem), also includes AES and CLMUL. |
+    | `AVX2` | AVX2 (~Haswell), also includes BMI2, F16C, and FMA. |
+    | `AVX3` | AVX-512F/BW/CD/DQ/VL (~Skylake-X). |
+    | `AVX3_DL` | AVX3 plus BitAlg, CLMUL, GFNI, VAES, VBMI, VBMI2, VNNI, VPOPCNT (~Icelake). |
+    | `AVX3_ZEN4` | AVX3_DL plus BF16, optimized for AMD Zen4. |
+    | `AVX3_SPR` | AVX3_DL plus AVX-512FP16 (~Sapphire Rapids). |
+    | `AVX10_2` | AVX10.2 (~Diamond Rapids). |
+  </Accordion>
+</AccordionGroup>
+
+## Key macros
+
+| Macro | Meaning |
+|---|---|
+| `HWY_TARGET` | The target currently being compiled. Equals `HWY_STATIC_TARGET` during static dispatch; changes per re-inclusion during dynamic dispatch. |
+| `HWY_STATIC_TARGET` | The best enabled baseline target. Always matches `HWY_TARGET` in static dispatch. |
+| `HWY_TARGETS` | The set of targets compiled for dynamic dispatch. Always includes `HWY_STATIC_TARGET`. |
+| `HWY_SUPPORTED_TARGETS` | The set of targets the current CPU supports at runtime. Expands to a literal if only one target is enabled, or to `SupportedTargets()` otherwise. |
+
+Targets are represented as bit flags in an `int64_t`. Numerically lower values indicate better (more capable) targets on the same architecture. This means `#if HWY_TARGET <= HWY_AVX3` matches AVX-512 and any target better than it (e.g., `HWY_AVX3_DL`).
+
+## Querying and controlling targets at runtime
+
+### `SupportedTargets()`
+
+```cpp
+int64_t mask = hwy::SupportedTargets();
+```
+
+Returns a bitfield of all enabled targets supported by the current CPU. The return value is never zero — there is always at least one available target. The result can change after calling `DisableTargets`.
+
+### `TargetName(t)`
+
+```cpp
+const char* name = hwy::TargetName(HWY_TARGET);
+// e.g., "AVX2", "NEON", "SVE2", "RVV", "SCALAR"
+```
+
+Returns a string literal identifying the single target `t`. Useful for logging which target is in use.
+
+### `DisableTargets(b)`
+
+```cpp
+hwy::DisableTargets(HWY_AVX3 | HWY_AVX3_DL);  // disable AVX-512 variants
+```
+
+Causes subsequent `SupportedTargets()` calls to exclude targets whose bits are set in `b`. Each call overrides all previous calls (the effect is not cumulative). Pass `b = 0` to restore the original behavior.
+
+Use `DisableTargets` in production code to opt out of targets that are undesirable — for example, if AVX-512 causes thermal throttling on a particular workload or machine.
+
+<Note>
+Use `SetSupportedTargetsForTest` rather than `DisableTargets` when writing tests that iterate over individual targets.
+</Note>
+
+### `SetSupportedTargetsForTest(b)`
+
+```cpp
+// Test only the AVX2 path
+hwy::SetSupportedTargetsForTest(HWY_AVX2);
+RunMyTest();
+
+// Restore normal behavior
+hwy::SetSupportedTargetsForTest(0);
+```
+
+Causes subsequent `SupportedTargets()` to return `b`, minus any targets disabled via `DisableTargets`. Pass `b = 0` to restore normal behavior. `b` is typically derived from individual bits of `SupportedTargets()` to test each supported target in turn.
+
+## Controlling which targets are compiled
+
+### x86 clusters
+
+x86 CPUs expose hundreds of individual feature flags. Highway groups related features into named clusters to keep compile time and binary size manageable. Each cluster requires a specific set of compiler flags — passing `-mavx2` alone is not sufficient for `HWY_AVX2`, which also requires FMA and BMI2.
+
+The compiler flags for each cluster are defined by `HWY_TARGET_STR*` macros in `set_macros-inl.h`. The grouping logic is in `kGroup*` in `targets.cc`.
+
+Notable rules:
+- `HWY_AVX3_ZEN4` is opt-in for static dispatch (define `HWY_WANT_AVX3_ZEN4`), but enabled by default for runtime dispatch.
+- `HWY_WANT_SSSE3` and `HWY_WANT_SSE4` force those targets into the baseline even when the compiler has not enabled them. On MSVC, these are the only way to enable SSSE3/SSE4 without enabling AVX.
+
+### `HWY_COMPILE_ONLY_STATIC` and `HWY_SKIP_NON_BEST_BASELINE`
+
+If your build sets `-m` flags specifying a baseline CPU architecture (e.g., `-march=armv8-a+crc`), dynamic dispatch may produce compile errors when building a target that conflicts with the global flags. To avoid this, define `HWY_COMPILE_ONLY_STATIC` or `HWY_SKIP_NON_BEST_BASELINE` for both Highway and your own code. This restricts compilation to the baseline target or better. `HWY_DYNAMIC_DISPATCH` still works correctly and degrades to a direct call when only one target is compiled.
+
+## Visiting all enabled targets
+
+`HWY_VISIT_TARGETS(VISITOR)` expands to `VISITOR(TARGET, NAMESPACE)` for every enabled target. This is useful for declaring target-specific functions in a header so they can be called from within a namespace without an extra `HWY_DYNAMIC_DISPATCH` indirection:
+
+```cpp
+// Declare FloorLog2 for every enabled target
+#define DECLARE_FLOOR_LOG2(TARGET, NAMESPACE) \
+  namespace NAMESPACE { void FloorLog2(const uint8_t*, size_t, uint8_t*); }
+
+HWY_VISIT_TARGETS(DECLARE_FLOOR_LOG2)
+```
+
+Note that `foreach_target.h` cannot be used for this purpose because it must reside in a `.cc` file; `HWY_VISIT_TARGETS` works in headers.
+
+## Testing across targets
+
+The test utilities in `hwy/tests/test_util-inl.h` provide macros that run a test function on every supported target. The typical pattern is to use `SetSupportedTargetsForTest` inside a loop over `SupportedAndGeneratedTargets()`:
+
+```cpp
+for (int64_t target : hwy::SupportedAndGeneratedTargets()) {
+  hwy::SetSupportedTargetsForTest(target);
+  // Run test — Highway will dispatch to `target`
+  RunMyVectorTest();
+}
+hwy::SetSupportedTargetsForTest(0);  // restore
+```
+
+`SupportedAndGeneratedTargets()` returns the list of targets that are both supported by the current CPU and compiled into the binary (i.e., the intersection of `SupportedTargets()` and `HWY_TARGETS`).

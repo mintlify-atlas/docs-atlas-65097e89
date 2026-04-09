@@ -1,0 +1,222 @@
+---
+title: "Reduction operations"
+description: "Horizontal reductions that combine all lanes into a single value, and type conversion operations."
+---
+
+Horizontal reductions combine all lanes of a vector into a single result. Because they operate across lanes rather than in parallel, they are slower than regular SIMD operations and are typically used outside of critical loops.
+
+## Horizontal reductions
+
+### Broadcast-result form
+
+These functions compute the reduction and broadcast the result to all lanes. Call `GetLane` on the result if you need a scalar value.
+
+```cpp
+V SumOfLanes(D, V v);  // Sum of all lanes, broadcast to every lane
+V MinOfLanes(D, V v);  // Minimum lane value, broadcast to every lane
+V MaxOfLanes(D, V v);  // Maximum lane value, broadcast to every lane
+```
+
+### Scalar-result form
+
+These are equivalent to `GetLane(SumOfLanes(d, v))` etc. but are potentially more efficient on some targets.
+
+```cpp
+T ReduceSum(D, V v);  // Sum of all lanes, returned as a scalar T
+T ReduceMin(D, V v);  // Minimum of all lanes, returned as a scalar T
+T ReduceMax(D, V v);  // Maximum of all lanes, returned as a scalar T
+```
+
+### Masked reductions
+
+These ignore lanes where the mask is false. The result is implementation-defined when all mask lanes are false.
+
+```cpp
+T MaskedReduceSum(D, M m, V v);  // Sum of lanes where m[i] is true
+T MaskedReduceMin(D, M m, V v);  // Minimum of lanes where m[i] is true
+T MaskedReduceMax(D, M m, V v);  // Maximum of lanes where m[i] is true
+```
+
+All three are equivalent to `GetLane(SumOfLanes(d, IfThenElseZero(m, v)))` etc., but potentially more efficient.
+
+---
+
+## Type conversion
+
+### Bit reinterpretation
+
+```cpp
+Vec<D>    BitCast(D, V v);
+// Reinterpret the bits of V as Vec<D>. No data is changed.
+
+Vec<D>    ResizeBitCast(D, V v);
+// Resize V to match the byte count of Vec<D>, then reinterpret.
+// If Vec<D> is larger than V, bytes beyond the original size are unspecified.
+
+Vec<DTo>  ZeroExtendResizeBitCast(DTo, DFrom, V v);
+// As ResizeBitCast, but bytes beyond the original size are zeroed.
+```
+
+### Integer ↔ float conversion
+
+```cpp
+// D: {f}; V: integer type of the same size
+Vec<D> ConvertTo(D, V v);   // Integer → float (exact, same element size)
+
+// V: {f}; D: integer type of the same size
+Vec<D> ConvertTo(D, V v);   // Float → integer, truncating toward zero; clamped to destination range
+Vec<D> ConvertInRangeTo(D, V v);  // As above, but implementation-defined if input is out of range
+
+// V: f; Ret: Vec<RebindToSigned<DFromV<V>>>
+Ret NearestInt(V a);   // Round to nearest integer; undefined for NaN
+Ret CeilInt   (V a);   // Equivalent to ConvertTo(RebindToSigned, Ceil(a)); often more efficient
+Ret FloorInt  (V a);   // Equivalent to ConvertTo(RebindToSigned, Floor(a)); often more efficient
+
+// D: i32; V: f64
+Vec<D> DemoteToNearestInt(D d, V v);  // Round to nearest (ties to even) and narrow f64 → i32
+
+// Masked form
+Vec<D> MaskedConvertTo(M m, D d, V v);  // Convert where m is active, zero otherwise
+```
+
+### Demotion (narrow to smaller type)
+
+These produce a half-sized result. Use `Rebind<MakeNarrow<T>, D>` or `Half<RepartitionToNarrow<D>>` to obtain the correct destination `D`.
+
+```cpp
+// Supported (V, D) pairs: see table below
+Vec<D> DemoteTo(D, V v);
+// Integer combinations: packed with signed/unsigned saturation to MakeNarrow<T>
+// f64 → {u,i}32: truncate toward zero, clamp to range
+// {u,i}64 → f32: convert integer to float
+// f32 → f16:     narrow float (rounding unspecified for bf16)
+// f64 → f32:     narrow float
+
+Vec<D> DemoteInRangeTo(D, V v);
+// f64 → {u,i}32 only; like DemoteTo but implementation-defined when out of range
+
+Vec<D> TruncateTo(D, V v);
+// Unsigned integer truncation: keep low bytes, discard high bytes
+// Supported pairs: (u64,u32), (u64,u16), (u64,u8), (u32,u16), (u32,u8), (u16,u8)
+```
+
+<Tip>
+Use `DemoteTo` for saturation (values clamped to the destination range) and `TruncateTo` when you know the high bits are already zero.
+</Tip>
+
+#### Demotion support table
+
+`DemoteTo` supports the following `(V, D)` combinations (✅ = supported):
+
+| From (V) → To (D) | i8 | i16 | i32 | u8 | u16 | u32 | f16 | bf16 | f32 |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| i16 | ✅ | | | ✅ | | | | | |
+| i32 | ✅ | ✅ | | ✅ | ✅ | | | | |
+| i64 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | | |
+| u16 | ✅ | | | ✅ | | | | | |
+| u32 | ✅ | ✅ | | ✅ | ✅ | | | | |
+| u64 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | | |
+| f32 | | | | | | | | ✅ | |
+| f64 | | | ✅ | | | ✅ | ✅ | | ✅ |
+
+### Two-vector demotion
+
+Not available when `HWY_TARGET == HWY_SCALAR`.
+
+```cpp
+// D and the output have twice as many lanes as V
+Vec<D> ReorderDemote2To(D, V a, V b);
+// Demote both a and b; output is a permutation of the inputs
+
+Vec<D> OrderedDemote2To(D d, V a, V b);
+// Demote a to lower half of result, b to upper half
+// Equivalent to Combine(d, DemoteTo(Half<D>(), b), DemoteTo(Half<D>(), a))
+
+// Unsigned only: (u16,u8), (u32,u16), (u64,u32)
+Vec<D> OrderedTruncate2To(D d, V a, V b);
+// Truncate a to lower half, b to upper half
+```
+
+### Promotion (widen to larger type)
+
+These promote a half-vector to a full vector. Use `LowerHalf` or `UpperHalf` to split a full vector first, or load with a half-sized tag.
+
+```cpp
+// Supported: unsigned/signed integer widening, f16→f32, f16→f64, bf16→f32, f32→f64
+// Also: {u,i}32 → f64
+// Also: f32 → i64/u64 (truncate toward zero; clamp to range)
+Vec<D> PromoteTo(D, V part);
+
+// f32 → i64/u64 (implementation-defined if out of range)
+Vec<D> PromoteInRangeTo(D, V part);
+```
+
+#### Promote lower or upper half of a full vector
+
+```cpp
+// Promote lower half of v (i in [0, Lanes(D())))
+Vec<D> PromoteLowerTo(D, V v);
+Vec<D> PromoteInRangeLowerTo(D, V v);  // f32 → i64/u64; impl-defined if out of range
+
+// Promote upper half of v (i in [Lanes(D()), 2*Lanes(D()))); not on HWY_SCALAR
+Vec<D> PromoteUpperTo(D, V v);
+Vec<D> PromoteInRangeUpperTo(D, V v);  // f32 → i64/u64; impl-defined if out of range
+```
+
+#### Promote even or odd lanes
+
+```cpp
+// V: {u,i}{8,16,32}, f{16,32}, bf16; D: RepartitionToWide<DFromV<V>>
+Vec<D> PromoteEvenTo(D, V v);  // Promote even-indexed lanes; V has 2x more lanes than D
+Vec<D> PromoteOddTo (D, V v);  // Promote odd-indexed lanes; not on HWY_SCALAR
+
+// V: f32; D: {u,i}64
+Vec<D> PromoteInRangeEvenTo(D, V v);
+Vec<D> PromoteInRangeOddTo (D, V v);
+```
+
+### Special-case conversion
+
+```cpp
+// (V, V8): (u32, u8) — fast path when all u32 lanes are already in [0, 256)
+V8 U8FromU32(V v);
+```
+
+---
+
+## Crypto operations
+
+Not available when `HWY_TARGET == HWY_SCALAR`.
+
+```cpp
+// V: u8
+V AESRound       (V state, V round_key);  // One AES encryption round (matches x86 AES-NI)
+V AESLastRound   (V state, V round_key);  // Final AES encryption round
+V AESRoundInv    (V state, V round_key);  // One AES decryption round (Equivalent Inverse Cipher)
+V AESLastRoundInv(V state, V round_key);  // Final AES decryption round
+V AESInvMixColumns(V state);              // InvMixColumns step (for key expansion)
+V AESKeyGenAssist<uint8_t kRcon>(V v);    // AES key generation assist
+
+// V: u64
+V CLMulLower(V a, V b);  // Carryless multiply of lower 64 bits of each 128-bit block → 128-bit result
+V CLMulUpper(V a, V b);  // Carryless multiply of upper 64 bits of each 128-bit block → 128-bit result
+```
+
+Latency for AES and `CLMul` operations is independent of the input values, making them safe for use in cryptographic code.
+
+---
+
+## Performance notes
+
+<Warning>
+Horizontal reductions (`SumOfLanes`, `ReduceSum`, etc.) are significantly slower than lane-parallel operations. Keep them outside inner loops where possible.
+</Warning>
+
+On older x86 targets (pre-AVX2, pre-AVX3), the following conversions have elevated cost and should be avoided in critical loops if possible:
+
+- 64-bit `ConvertTo` (both directions)
+- `i32` → `u16` `DemoteTo`
+- `u32` → `f32` `ConvertTo`
+- `f16` `PromoteTo` / `DemoteTo`
+
+See the [design philosophy](/resources/design-philosophy) page for more guidance on writing efficient Highway code across target architectures.

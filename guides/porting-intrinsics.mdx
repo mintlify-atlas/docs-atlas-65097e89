@@ -1,0 +1,176 @@
+---
+title: "Porting from platform intrinsics"
+description: "How to migrate existing x86 SSE/AVX or ARM NEON intrinsic code to portable Highway operations."
+---
+
+If you have existing code written with x86 SSE/AVX intrinsics or ARM NEON intrinsics, Highway provides portable equivalents for almost every common operation. Porting gives you code that runs on all platforms Highway supports — x86, ARM, RISC-V, POWER, IBM Z, and WebAssembly — without separate code paths.
+
+## Why port to Highway
+
+- **Single source, all platforms**: One implementation targets 27 instruction set variants. Highway compiles it correctly for each.
+- **Runtime dispatch**: Highway selects the best available target at runtime. Your code automatically benefits from AVX-512 on Skylake servers and falls back to SSE2 on older machines.
+- **Correctness across targets**: The `SCALAR` and `EMU128` fallback targets let you test your logic without any SIMD hardware.
+- **Easier maintenance**: Highway ops read more like mathematical intent than raw intrinsics, and do not require you to track register naming conventions across ISAs.
+
+## Finding the Highway equivalent of an intrinsic
+
+The most reliable approach is to search for the intrinsic name in Highway's platform-specific source files:
+
+- x86: `hwy/ops/x86_128-inl.h` (SSE), `hwy/ops/x86_256-inl.h` (AVX2), `hwy/ops/x86_512-inl.h` (AVX-512)
+- ARM: `hwy/ops/arm_neon-inl.h`, `hwy/ops/arm_sve-inl.h`
+- Other: `hwy/ops/rvv-inl.h`, `hwy/ops/wasm_128-inl.h`, etc.
+
+The Highway op is typically the name of the function that wraps the intrinsic. After identifying it, consult the [quick reference](/api/overview) for the full signature.
+
+## Common x86 → Highway mappings
+
+<Tabs>
+  <Tab title="Float (SSE)">
+    | x86 intrinsic | Highway op | Notes |
+    |---|---|---|
+    | `_mm_add_ps` | `Add(a, b)` | |
+    | `_mm_sub_ps` | `Sub(a, b)` | |
+    | `_mm_mul_ps` | `Mul(a, b)` | |
+    | `_mm_div_ps` | `Div(a, b)` | |
+    | `_mm_sqrt_ps` | `Sqrt(a)` | |
+    | `_mm_loadu_ps` | `LoadU(d, ptr)` | Unaligned load |
+    | `_mm_load_ps` | `Load(d, ptr)` | Aligned load |
+    | `_mm_storeu_ps` | `StoreU(v, d, ptr)` | Unaligned store |
+    | `_mm_store_ps` | `Store(v, d, ptr)` | Aligned store |
+    | `_mm_set1_ps` | `Set(d, value)` | Broadcast scalar to all lanes |
+    | `_mm_setzero_ps` | `Zero(d)` | |
+    | `_mm_max_ps` | `Max(a, b)` | |
+    | `_mm_min_ps` | `Min(a, b)` | |
+    | `_mm_fmadd_ps` | `MulAdd(a, b, c)` | `a*b + c` |
+    | `_mm_fnmadd_ps` | `NegMulAdd(a, b, c)` | `-a*b + c` |
+  </Tab>
+  <Tab title="Integer (SSE)">
+    | x86 intrinsic | Highway op | Notes |
+    |---|---|---|
+    | `_mm_add_epi32` | `Add(a, b)` | Works for any integer lane type |
+    | `_mm_sub_epi32` | `Sub(a, b)` | |
+    | `_mm_mullo_epi32` | `Mul(a, b)` | Lower half of product |
+    | `_mm_and_si128` | `And(a, b)` | |
+    | `_mm_or_si128` | `Or(a, b)` | |
+    | `_mm_xor_si128` | `Xor(a, b)` | |
+    | `_mm_andnot_si128` | `AndNot(a, b)` | Note: argument order differs — `AndNot(a,b)` = `~a & b` |
+    | `_mm_slli_epi32` | `ShiftLeft<N>(v)` | N is a compile-time constant |
+    | `_mm_srli_epi32` | `ShiftRight<N>(v)` | Logical shift; N is compile-time |
+    | `_mm_srai_epi32` | `ShiftRight<N>(v)` | For signed types, this is arithmetic |
+    | `_mm_adds_epu8` | `SaturatedAdd(a, b)` | Saturating add |
+    | `_mm_loadu_si128` | `LoadU(d, ptr)` | |
+    | `_mm_storeu_si128` | `StoreU(v, d, ptr)` | |
+    | `_mm_set1_epi32` | `Set(d, value)` | |
+    | `_mm_setzero_si128` | `Zero(d)` | |
+  </Tab>
+  <Tab title="Comparisons and masks">
+    In Highway, comparisons return a `Mask` type, not a vector. This is a key difference from SSE intrinsics, where `_mm_cmpeq_ps` returns a vector of all-zero or all-one lanes.
+
+    | x86 intrinsic | Highway op | Notes |
+    |---|---|---|
+    | `_mm_cmpeq_ps` | `Eq(a, b)` | Returns `Mask<D>` |
+    | `_mm_cmplt_ps` | `Lt(a, b)` | Returns `Mask<D>` |
+    | `_mm_cmple_ps` | `Le(a, b)` | Returns `Mask<D>` |
+    | `_mm_cmpgt_ps` | `Gt(a, b)` | Returns `Mask<D>` |
+    | `_mm_blendv_ps` | `IfThenElse(mask, yes, no)` | Takes `Mask<D>`, not a vector mask |
+    | `_mm_movemask_ps` | `AllTrue(d, mask)` / `CountTrue(d, mask)` | Depends on your use-case |
+    | `_mm_and_ps` (masking) | `IfThenElseZero(mask, v)` | Select or zero |
+
+    To convert a `Mask` back to a vector of 0/−1 values (for arithmetic), use `VecFromMask(d, mask)`.
+  </Tab>
+</Tabs>
+
+## Common ARM NEON → Highway mappings
+
+| NEON intrinsic | Highway op | Notes |
+|---|---|---|
+| `vadd_f32` / `vaddq_f32` | `Add(a, b)` | Highway is width-agnostic |
+| `vsub_f32` / `vsubq_f32` | `Sub(a, b)` | |
+| `vmul_f32` / `vmulq_f32` | `Mul(a, b)` | |
+| `vld1_f32` / `vld1q_f32` | `Load(d, ptr)` | NEON loads are always "aligned enough" |
+| `vst1_f32` / `vst1q_f32` | `Store(v, d, ptr)` | |
+| `vdup_n_f32` / `vdupq_n_f32` | `Set(d, value)` | |
+| `vmax_f32` / `vmaxq_f32` | `Max(a, b)` | |
+| `vmin_f32` / `vminq_f32` | `Min(a, b)` | |
+| `vfma_f32` / `vfmaq_f32` | `MulAdd(a, b, c)` | |
+| `vceq_f32` / `vceqq_f32` | `Eq(a, b)` | Returns `Mask<D>` |
+| `vclt_f32` / `vcltq_f32` | `Lt(a, b)` | Returns `Mask<D>` |
+| `vbsl_f32` / `vbslq_f32` | `IfThenElse(mask, yes, no)` | |
+
+## How masks work in Highway
+
+SSE and NEON represent masks as vectors of 0/−1 lane values. Highway uses a distinct `Mask<D>` type:
+
+```cpp
+// x86 intrinsics style
+__m128 mask_vec = _mm_cmplt_ps(a, b);   // vector with 0xFF.../0x00... lanes
+__m128 result   = _mm_and_ps(a, mask_vec);
+
+// Highway style
+const hn::ScalableTag<float> d;
+const auto mask   = hn::Lt(a, b);         // Mask<decltype(d)>
+const auto result = hn::IfThenElseZero(mask, a);
+```
+
+To create a mask covering the first `n` lanes (useful for partial-vector operations), use `FirstN`:
+
+```cpp
+const auto partial_mask = hn::FirstN(d, n);
+const auto partial_load = hn::MaskedLoad(partial_mask, d, ptr);
+hn::BlendedStore(result, partial_mask, d, out_ptr);
+```
+
+## Using platform-specific intrinsics selectively
+
+Sometimes you need a platform-specific intrinsic that Highway does not expose. Use `HWY_TARGET` to guard it:
+
+```cpp
+#if HWY_TARGET == HWY_AVX2
+  // Use a specific AVX2 intrinsic not wrapped by Highway
+  __m256i result = _mm256_some_special_op(a, b);
+#elif HWY_TARGET == HWY_NEON || HWY_TARGET == HWY_NEON_BF16
+  // NEON-specific path
+  float32x4_t result = vsome_neon_op(a, b);
+#else
+  // Generic Highway fallback
+  const auto result = hn::Add(a, b);
+#endif
+```
+
+<Warning>
+Platform-specific branches defeat the portability benefits of Highway and must be maintained separately for each platform. Use them sparingly, only when the performance gain justifies the complexity.
+</Warning>
+
+## Converting between Highway vectors and raw intrinsic types
+
+If you are incrementally porting code, you may need to mix Highway vectors with raw intrinsic types. Highway vectors are backed by the same underlying types (`__m128`, `float32x4_t`, etc.), so you can use `BitCast` or simply assign through a pointer:
+
+```cpp
+// Load a raw __m128 from existing code into a Highway vector
+__m128 raw = _mm_set1_ps(1.0f);
+const hn::Full128<float> d128;
+const auto hwy_vec = hn::BitCast(d128, hn::Vec128<float>{raw});
+
+// Extract a Highway vector back to a raw intrinsic type
+__m128 back = hn::BitCast(d128, hwy_vec).raw;
+```
+
+The exact mechanism depends on the Highway version and target. A simpler approach for incremental migration is to store the vector to memory and reload it:
+
+```cpp
+alignas(16) float tmp[4];
+hn::Store(hwy_vec, d128, tmp);
+__m128 raw = _mm_load_ps(tmp);
+```
+
+## Tips for incremental migration
+
+1. **Start with one function**: Pick a self-contained hot function. Port it to Highway and verify correctness against the original using the `SCALAR` or `EMU128` targets.
+
+2. **Copy an example first**: Highway's boilerplate (include order, namespace structure) must be exact. Copy `hwy/examples/skeleton.cc` and replace `FloorLog2` with your function before modifying.
+
+3. **Use the SCALAR target for debugging**: `HWY_TARGET == HWY_SCALAR` uses one lane per vector, making it easy to trace through logic in a debugger.
+
+4. **Check the ops files for unmapped intrinsics**: If you cannot find a Highway equivalent for an intrinsic, search `hwy/ops/x86_128-inl.h` or `hwy/ops/arm_neon-inl.h` for the intrinsic name. The surrounding Highway function is the equivalent.
+
+5. **Port tests alongside code**: Highway's test infrastructure runs each test on every supported target. Copy a file from `hwy/tests/` to get the harness, then add assertions for your function.

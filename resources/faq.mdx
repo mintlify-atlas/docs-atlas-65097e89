@@ -1,0 +1,328 @@
+---
+title: "FAQ"
+description: "Frequently asked questions about Highway portability, API design, and usage"
+---
+
+## Getting started
+
+<AccordionGroup>
+  <Accordion title="How do I get the Highway library?">
+    Highway is available in numerous package managers under the name `libhwy-dev`. After installing, add it to your CMake-based build with:
+
+    ```cmake
+    find_package(HWY 1.3.0)
+    target_link_libraries(your_project PRIVATE hwy)
+    ```
+
+    If you use Git, add Highway as a submodule by adding this to `.gitmodules`:
+
+    ```ini
+    [submodule "highway"]
+        path = highway
+        url = https://github.com/google/highway
+    ```
+
+    Anyone who clones your repository with `git clone --recursive` will also get Highway. If you're not using Git, you can download a [Highway release](https://github.com/google/highway/releases) and add it to your source tree manually.
+
+    For building Highway yourself, the two best-supported build systems are CMake and Bazel:
+
+    - **CMake**: Add `add_subdirectory(highway)` to your `CMakeLists.txt`.
+    - **Bazel**: Reference Highway with `deps = ["//path/highway:hwy"]`.
+
+    For other build systems, add `hwy/per_target.cc` and `hwy/targets.cc` to your list of files to compile and link. All other files are headers, typically included via `highway.h`.
+  </Accordion>
+
+  <Accordion title="What's the easiest way to start using Highway?">
+    Copy an existing file such as `hwy/examples/benchmark.cc` or `hwy/examples/skeleton.cc`. This ensures the boilerplate (namespaces, include order) is correct from the start.
+
+    In `RunBenchmarks` (for `benchmark.cc`) or `FloorLog2` (for `skeleton.cc`), insert your own code. You can start with normal C++ — it will still be compiled with the appropriate SIMD flags, which may allow the compiler to autovectorize straightforward integer code without branches.
+
+    Next, wrap your scalar implementation in:
+
+    ```cpp
+    #if HWY_TARGET == HWY_SCALAR || HWY_TARGET == HWY_EMU128
+      // scalar version
+    #else
+      // vectorized version using Highway ops
+    #endif
+    ```
+
+    If you also create a test by copying a file from `hwy/tests/`, the Highway infrastructure will run your test for all supported targets. Because `SCALAR` or `EMU128` is always supported, this validates that your vector code behaves identically to your scalar code.
+  </Accordion>
+</AccordionGroup>
+
+## Documentation
+
+<AccordionGroup>
+  <Accordion title="How do I find the Highway op name for an existing intrinsic?">
+    Search for the intrinsic in the corresponding platform ops file, for example [`x86_128-inl.h`](https://github.com/google/highway/blob/master/hwy/ops/x86_128-inl.h). The Highway op is typically the name of the function that calls the intrinsic.
+
+    The [quick reference](https://github.com/google/highway/blob/master/g3doc/quick_reference.md) lists all Highway ops.
+  </Accordion>
+
+  <Accordion title="Are there examples of porting intrinsics to Highway?">
+    Yes. See the [examples section](https://github.com/google/highway#examples) of the Highway README on GitHub.
+  </Accordion>
+
+  <Accordion title="Where do I find documentation for each platform's intrinsics?">
+    - **Intel**: [Intrinsics guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide)
+    - **Arm NEON**: [Arm intrinsics guide](https://developer.arm.com/architectures/instruction-sets/intrinsics)
+    - **Arm SVE**: [SVE intrinsics reference](https://dougallj.github.io/asil/)
+    - **RISC-V V**: [V spec](https://github.com/riscv/riscv-v-spec/blob/master/v-spec.adoc) and [intrinsics viewer](https://dzaima.github.io/intrinsics-viewer/#)
+    - **WebAssembly**: [WASM SIMD intrinsics](https://nemequ.github.io/waspr/intrinsics)
+    - **PPC**: [Power ISA](https://openpowerfoundation.org/specifications/isa/) and [Vector intrinsic programming reference](https://openpowerfoundation.org/specifications/vectorintrinsicprogrammingreference/)
+  </Accordion>
+
+  <Accordion title="Where do I find instruction latency and throughput data?">
+    - **x86**: [uops.info](https://www.uops.info/table.html), [agner.org/optimize](https://agner.org/optimize/), the Intel intrinsics guide above, and [AMD's instruction tables (zip)](https://www.amd.com/system/files/TechDocs/56665.zip).
+    - **Arm**: The [Software Optimization Guide](https://developer.arm.com/documentation/pjdoc466751330-9685/latest/) for Neoverse V1 and similar cores.
+    - **RISC-V**: Vendor-specific tables (typically not publicly available).
+  </Accordion>
+
+  <Accordion title="Where can I find SIMD-friendly algorithm ideas?">
+    - [Algorithms for Modern Hardware](https://en.algorithmica.org/hpc/) — online book
+    - [SIMD for C++ developers](http://const.me/articles/simd/simd.pdf)
+    - [Bit twiddling collection](https://graphics.stanford.edu/~seander/bithacks.html)
+    - [SIMD-within-a-register](http://aggregate.org/MAGIC/)
+    - *Hacker's Delight* — a collection of bitwise identities (note: written for hypothetical RISC CPUs, which differ from current SIMD capabilities)
+  </Accordion>
+
+  <Accordion title="How do I predict performance?">
+    End-to-end application benchmarking is the most reliable approach. Microbenchmarks are subject to unrealistic cache and branch predictor behavior unless carefully designed.
+
+    For quick estimates of short code sequences, use [llvm-mca](https://gcc.godbolt.org/z/n-KcQ-), which is integrated into Compiler Explorer. It shows predicted throughput and functional unit pressure, but does not model dynamic effects like the frontend or caches. See also [uica](https://uica.uops.info/), which is reportedly more accurate ([paper](https://arxiv.org/pdf/2107.14210.pdf)).
+
+    Intel's IACA used to serve a similar purpose but has been discontinued.
+  </Accordion>
+</AccordionGroup>
+
+## Correctness
+
+<AccordionGroup>
+  <Accordion title="Which targets are covered by my tests?">
+    Tests execute for every target supported by the current CPU. If you run tests in a cloud environment where the CPU may vary across runs, specify constraints to ensure the CPU is as recent as possible.
+  </Accordion>
+
+  <Accordion title="Why do floating-point results differ on some platforms?">
+    Although IEEE-754 guarantees rounding for each operation, common compiler flags can invalidate those guarantees. In particular, `clang`/`GCC -ffp-contract` and `MSVC /fp:contract` can change results when a multiply is followed by an add — fusing both into a single FMA with only one rounding, which typically changes results by around 10⁻⁵.
+
+    Using Highway's `MulAdd` op can have the same effect: SSE4, NEON, and WASM may not support FMA, but most other platforms do.
+
+    A common workaround is to use both a relative and absolute (L1 norm) tolerance when comparing expected values. This is robust across both large and small magnitudes.
+
+    The `-ffast-math` flag can have more subtle and dangerous effects. It allows operation reordering (which changes results) and removes guarantees about NaN, so Highway does not recommend using it.
+  </Accordion>
+
+  <Accordion title="How do I make my code safe for asan and msan?">
+    The main challenge is handling remainders in arrays not divisible by the vector length. Using `LoadU`, or even `MaskedLoad` with `FirstN(d, remaining_lanes)`, may trigger page faults or asan errors.
+
+    The recommended approach is `hwy/contrib/algo/transform-inl.h`. Instead of writing a loop with remainder handling yourself, define a templated (lambda) function implementing one loop iteration. The `Generate` or `Transform*` functions handle the remainder automatically.
+  </Accordion>
+</AccordionGroup>
+
+## API design
+
+<AccordionGroup>
+  <Accordion title="Are the `d` arguments optimized out?">
+    Yes. `d` is an lvalue of the zero-sized type `Simd<>`, typically obtained via `ScalableTag<T>`. These only select overloaded functions and occupy no storage at runtime.
+  </Accordion>
+
+  <Accordion title="Why do only some functions have a `d` argument?">
+    Ops that receive and return vectors typically don't need a `d` argument because the type information on vectors is sufficient for C++ overload resolution. The `d` argument is required when:
+
+    - **Influencing memory access width**: The arguments to `Simd<>` include an upper bound `N` and a shift count `kPow2` to divide the number of lanes by a power of two.
+    - **Specifying the return type**: Factory functions like `Set`, `FirstN`, `BitCast`, and conversions like `PromoteTo` need `d` to know what type to return.
+    - **Disambiguating mask type**: Ops like `VecFromMask` or `AllTrue` need `d` because masks may be generic types shared between multiple lane types.
+    - **Determining lane count**: Ops defined in terms of the upper half of a vector (`UpperHalf`, `Combine`, `ConcatUpperLower`) and reductions like `MaxOfLanes` need `d` to determine the actual number of lanes.
+  </Accordion>
+
+  <Accordion title="What's the policy for adding new ops?">
+    Reach out via a GitHub issue — the team is happy to discuss. The general guideline is:
+
+    - There should be concrete plans to use the op.
+    - It must be efficiently implementable on all platforms without major performance cliffs.
+    - Each implementation should be at least as efficient as what portable code without the op could achieve.
+
+    See the [op wishlist](https://github.com/google/highway/blob/master/g3doc/op_wishlist.md) for ops under consideration.
+  </Accordion>
+
+  <Accordion title="`auto` is discouraged — what vector type should I use?">
+    Use `Vec<D>` or `Mask<D>`, where `D` is the type of `d`. You can use `decltype(d)` for `D`. To keep code concise, define a type alias:
+
+    ```cpp
+    using V = Vec<decltype(d)>;
+    ```
+
+    The Highway implementation uses `VFromD<D>`, which is equivalent but currently necessary because `Vec` is defined after the Highway implementations in `hwy/ops/*`.
+  </Accordion>
+
+  <Accordion title="Why is `base.h` separate from `highway.h`?">
+    Some files only need compiler-dependent macros such as `HWY_RESTRICT` in public headers. Including `highway.h` just for these would be expensive — some platform headers declare thousands of intrinsics. `base.h` provides the macros without that overhead.
+  </Accordion>
+
+  <Accordion title="What are restrict pointers, and when should I use `HWY_RESTRICT`?">
+    Restrict relates to aliasing. If a function has two pointer arguments of the same type, the compiler may be conservative about caching accesses because one pointer's value could change after a write through the other.
+
+    `float* HWY_RESTRICT p` promises that `p` is the only way to access the pointed-to memory — it doesn't alias other pointers. This usually improves codegen when there are multiple pointers, at least one of which is `const`.
+
+    <Warning>
+      The generated code may not behave as expected if you break the no-aliasing promise.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
+
+## Portability
+
+<AccordionGroup>
+  <Accordion title="How do I generate code for only a single instruction set (static dispatch)?">
+    If you know all target CPUs support a given baseline (for example, SSE4), you can reduce binary size and compile time by generating code only for that instruction set. This is actually the default for Highway code that does not use `foreach_target.h`.
+
+    Highway detects which instruction sets the compiler may use via predefined macros, which are governed by compiler flags. See this [example on Compiler Explorer](https://gcc.godbolt.org/z/rGnjMevKG) for the required flags on x86.
+  </Accordion>
+
+  <Accordion title="Why does my working x86 code not compile on SVE or RISC-V?">
+    Assuming the code uses only documented identifiers (not AVX2-specific types like `Vec256`), the problem is likely due to compiler limitations related to sizeless vectors. Code that works on x86 or NEON but not on SVE or RISC-V V is probably breaking one of these rules:
+
+    - Use functions (`Eq`, `Lt`) instead of overloaded operators (`==`, `<`).
+    - Prefix Highway ops with `hwy::HWY_NAMESPACE`, use an alias like `hn::Load`, or place your code inside `namespace hwy::HWY_NAMESPACE`.
+    - Avoid arrays of vectors and `static`/`thread_local`/member vectors. Use arrays of the lane type `T` instead.
+    - Avoid pointer arithmetic on vectors. Increment pointers to lanes by the vector length (`Lanes(d)`).
+  </Accordion>
+
+  <Accordion title="Why are class members not allowed?">
+    This is a limitation of Clang and GCC, which disallow sizeless types (including SVE and RISC-V vectors) as class members. The size of these vectors is not known at compile time. MSVC does not yet support SVE or RISC-V V, so this issue hasn't arisen there.
+  </Accordion>
+
+  <Accordion title="Why are overloaded operators not allowed?">
+    C++ disallows overloading operators for built-in types. On SVE and RISC-V, vectors are indeed built-in types due to the class member limitation above. Discussions are ongoing about whether compilers could add built-in `operator<` for these vector types. If that becomes widely supported, this limitation can be lifted.
+  </Accordion>
+
+  <Accordion title="Can I declare arrays of lanes on the stack?">
+    This mostly works, but is not guaranteed to be safe or portable. On RISC-V, vectors can be quite large (64 KiB for LMUL=8), which can exceed the stack size. Use `hwy::AllocateAligned<T>(Lanes(d))` instead.
+  </Accordion>
+</AccordionGroup>
+
+## Boilerplate
+
+<AccordionGroup>
+  <Accordion title="What is boilerplate?">
+    Boilerplate refers to the reusable infrastructure that supports runtime dispatch — mainly the namespace structure, include ordering, and include guard patterns. The ordering of this code matters, and the vector-specific boilerplate can be unfamiliar at first.
+
+    The best way to get started is to copy from `hwy/examples/skeleton.cc` or another existing Highway source file. See also [the examples on GitHub](https://github.com/google/highway#examples).
+  </Accordion>
+
+  <Accordion title="What's the difference between `HWY_BEFORE_NAMESPACE` and `HWY_ATTR`?">
+    Both enable SIMD code generation in Clang and GCC. `HWY_BEFORE_NAMESPACE` is a pragma that applies to all subsequent namespace-scope and member functions, but not lambda functions. `HWY_ATTR` must be applied per-function, but is still required for lambda functions that use SIMD.
+
+    Using `HWY_BEFORE_NAMESPACE` is more convenient when you have many functions. Use `HWY_ATTR` for lambdas.
+  </Accordion>
+
+  <Accordion title="Why use `HWY_NAMESPACE`?">
+    `HWY_NAMESPACE` is required when using `foreach_target.h` to generate code for multiple targets and dispatch to the best one at runtime. The namespace name changes for each target to avoid ODR violations.
+
+    This is not strictly necessary for binaries built for a single target. However, placing your code in a `HWY_NAMESPACE` namespace (nested under your project's namespace) from the start makes it easy to add runtime dispatch later.
+  </Accordion>
+
+  <Accordion title="What are these unusual include guards?">
+    When using `foreach_target.h`, the file is re-compiled via repeated preprocessor `#include` — once per target. A conventional include guard would strip out the header contents after the first target.
+
+    By convention, Highway uses `*-inl.h` files with a special per-target include guard:
+
+    ```cpp
+    #if defined(MYPROJECT_FILE_INL_H_TARGET) == defined(HWY_TARGET_TOGGLE)
+    #ifdef MYPROJECT_FILE_INL_H_TARGET
+    #undef MYPROJECT_FILE_INL_H_TARGET
+    #else
+    #define MYPROJECT_FILE_INL_H_TARGET
+    #endif
+    ```
+
+    Highway defines and undefines `HWY_TARGET_TOGGLE` after each recompilation so that the guarded header is included exactly once per target.
+
+    This is only necessary when using `foreach_target.h`, but adding the special guards from the start makes it easy to add runtime dispatch later.
+  </Accordion>
+
+  <Accordion title="How do I prevent lint warnings for the include guard?">
+    Insert an empty conventional guard before your per-target guard:
+
+    ```cpp
+    // Empty include guard to satisfy linters
+    #ifndef MYPROJECT_FILE_INL_H_
+    #define MYPROJECT_FILE_INL_H_
+    #endif
+    // Per-target guard follows:
+    #if defined(MYPROJECT_FILE_INL_H_TARGET) == defined(HWY_TARGET_TOGGLE)
+    // ...
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance
+
+<AccordionGroup>
+  <Accordion title="Why does Highway differentiate aligned and unaligned loads/stores?">
+    Intel CPUs since Haswell have greatly reduced the penalty for unaligned loads — `MOVDQU` now splits unaligned loads into two aligned loads internally. However, this uses two load ports per cycle. For low-arithmetic-intensity algorithms like dot products that are mostly loading data, this can be a meaningful bottleneck. Unaligned stores are typically more expensive on any platform.
+
+    Use aligned stores where possible and test on x86, which may raise faults if your pointers are actually unaligned.
+
+    Note: More specialized memory operations like `CompressStore` or `BlendedStore` are not specialized for aligned pointers, to avoid doubling the number of memory op variants.
+  </Accordion>
+
+  <Accordion title="When does `Prefetch` help?">
+    Prefetching reduces apparent memory latency by starting loads before the data is needed. In latency-sensitive applications, this can improve performance by 10–20%. However:
+
+    - The CPU may already be automatically prefetching based on your access patterns. One or two continuous forward or backward scans are usually detected automatically. Extra prefetches in those cases can *degrade* performance.
+    - If the application is bottlenecked by vector execution resources rather than memory, prefetching provides little benefit.
+    - A prefetch must come sufficiently ahead of the subsequent load to be useful, but not so far ahead that the data falls out of cache again.
+
+    The optimal prefetch distance is highly platform- and microarchitecture-dependent, making it difficult to choose a value that works well everywhere.
+  </Accordion>
+
+  <Accordion title="Is CPU clock throttling really an issue with AVX-512?">
+    Early Intel implementations of AVX2 and especially AVX-512 reduced clock frequency once certain instructions were executed. A [microbenchmark designed to reveal the worst case](https://lemire.me/blog/2018/08/15/the-dangers-of-avx-512-throttling-a-3-impact/) (with only a few AVX-512 instructions) shows a 3–4% slowdown on Skylake.
+
+    In practice, the speedup from sustained SIMD usage is much larger than the impact of throttling. For JPEG XL image decompression, a 1.4–1.6× end-to-end speedup from AVX-512 vs. AVX2 is observed even on multiple cores of a Xeon Gold. For [vectorized Quicksort](https://github.com/google/highway/blob/master/hwy/contrib/sort/README.md#study-of-avx-512-downclocking), throttling is not detectable on a single Skylake core, and the AVX-512 startup overhead is worthwhile for inputs ≥ 80 KiB.
+
+    Throttling is [no longer a concern on recent Intel implementations](https://travisdowns.github.io/blog/2020/08/19/icl-avx512-freq.html#summary) of AVX-512 (Icelake and Rocket Lake client), and AMD CPUs do not throttle AVX2 or AVX-512.
+
+    Because throttling or SIMD usage can affect the entire system, measure end-to-end application performance rather than relying on microbenchmarks.
+  </Accordion>
+
+  <Accordion title="Why does my CPU sometimes only execute one vector instruction per cycle when the specs say 2–4?">
+    CPUs assume a mix of instruction types. Instructions like permutes, swizzles, and comparisons are assumed to be less common and are often limited to one per cycle. Check the platform's optimization guide for per-instruction throughput.
+
+    For example, Intel Skylake executes swizzles on port 5, so only one per cycle. Similarly, Arm V1 can only execute one predicate-setting instruction (including comparisons) per cycle.
+
+    As a workaround, consider replacing equality comparisons with the OR-sum of XOR differences.
+  </Accordion>
+
+  <Accordion title="How expensive are Gather and Scatter?">
+    Platforms that support gather/scatter typically process **one lane per cycle**. Normal Load/Store can handle two or even three entire vectors per cycle, so avoid gather/scatter where possible.
+
+    That said, some algorithms — such as rANS entropy coding and hash tables — require gathers, and using them is still usually better than avoiding vectorization entirely.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="I see `DWARF error: invalid or unhandled FORM value: 0x25` or `undefined reference to __extendhfsf2` when building with Clang 16.">
+    This happens when Clang has been updated but `compiler-rt` has not. When installing Clang 16 from `apt.llvm.org`, ensure `libclang-rt-16-dev` is also installed.
+
+    LLVM 16 changed the ABI of `__extendhfsf2` to match the GCC ABI, which requires updating the entire toolchain together. See [issue #1709](https://github.com/google/highway/issues/1709) for more information.
+  </Accordion>
+
+  <Accordion title="I see `inlining failed in call to 'always_inline' ... target specific option mismatch`.">
+    This is caused by a conflict between `-m` compiler flags and Highway's dynamic dispatch mode. It's typically triggered by defining `HWY_IS_TEST` (set by the CMake/Bazel builds for tests) or `HWY_COMPILE_ALL_ATTAINABLE`.
+
+    The cause: when `-m` flags force a certain baseline, non-SIMD `forceinline` functions like `PreventElision` may be compiled for a newer CPU baseline than the minimum target that Highway sets via `#pragma`. The compiler enforces a safety check: inlining higher-baseline functions into a lower-baseline function raises an error.
+
+    Three possible fixes:
+
+    1. **Disable dynamic dispatch**: Define `HWY_COMPILE_ONLY_STATIC` to use only the baseline target.
+    2. **Skip superseded targets**: Define `HWY_SKIP_NON_BEST_BASELINE` to dispatch but skip targets superseded by the baseline.
+    3. **Remove `-m` flags**: These flags contradict the goals of test coverage and dynamic dispatch. Either remove them entirely, or only set flags corresponding to the oldest target Highway supports.
+
+    See [#1460](https://github.com/google/highway/issues/1460), [#1570](https://github.com/google/highway/issues/1570), and [#1707](https://github.com/google/highway/issues/1707) for more context.
+  </Accordion>
+</AccordionGroup>

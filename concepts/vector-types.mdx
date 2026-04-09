@@ -1,0 +1,181 @@
+---
+title: "Vector types and tags"
+description: "Understanding Highway's type system: tags, vectors, masks, and lane types."
+---
+
+Highway's type system is built around a central idea: operations are expressed as overloaded functions, not constructors or class methods. A zero-sized **tag** type selects the right overload and communicates the desired lane type and vector width. This approach is required because targets like RVV and SVE use sizeless built-in vector types that cannot be wrapped in classes.
+
+## Lane types
+
+A vector consists of one or more **lanes** of a single scalar type `T`. Highway supports:
+
+| Category | Types |
+|---|---|
+| Unsigned integers | `uint8_t`, `uint16_t`, `uint32_t`, `uint64_t` |
+| Signed integers | `int8_t`, `int16_t`, `int32_t`, `int64_t` |
+| Floating-point | `float16_t`, `bfloat16_t`, `float32_t`, `float64_t` |
+
+<Note>
+`char` is not supported directly. If you load from or store to `char*`, use `T = uint8_t` or `T = int8_t` and cast your pointer.
+</Note>
+
+`float16_t` (IEEE binary16) and `bfloat16_t` (upper 16 bits of binary32) are always wrapper structs to guarantee binary compatibility. They only support load, store, and conversion to/from `float32_t`. Use `ConvertScalarTo` to convert values, or `BitCastScalar` to access the underlying bit representation.
+
+You can check whether a type is an integer lane type with `IsIntegerLaneType<T>`, which returns true for all `int##_t` and `uint##_t` types.
+
+## The tag type `D`
+
+The tag type `D` is the alias `Simd<T, N, kPow2>`. It is a zero-sized type — it holds no data — used purely to select overloaded functions. You pass an lvalue `d` of type `D` to ops such as `Zero`, `Set`, and `Load`:
+
+```cpp
+#include "hwy/highway.h"
+HWY_BEFORE_NAMESPACE();
+namespace project {
+namespace HWY_NAMESPACE {
+namespace hn = hwy::HWY_NAMESPACE;
+
+void Example() {
+  // Create a tag for full-width float32 vectors
+  const hn::ScalableTag<float> d;
+
+  // Use the tag to call ops — no constructors
+  const auto zeros = hn::Zero(d);        // all lanes = 0.0f
+  const auto fives = hn::Set(d, 5.0f);   // all lanes = 5.0f
+}
+
+}  // namespace HWY_NAMESPACE
+}  // namespace project
+HWY_AFTER_NAMESPACE();
+```
+
+Do not refer to `Simd<T, N, kPow2>` directly in your code. Use the aliases below instead.
+
+## Tag aliases
+
+### `ScalableTag<T>` / `HWY_FULL(T)` — full native vectors
+
+```cpp
+ScalableTag<float> d;        // full-width float32 vector, all lanes active
+ScalableTag<uint8_t> d8;     // full-width uint8 vector
+HWY_FULL(float) d;           // macro equivalent
+```
+
+This is the preferred tag for most code. It selects full vectors that use all available hardware lanes. For targets with register groups (RVV), you can pass an optional second argument to control `LMUL`:
+
+```cpp
+ScalableTag<float, 1> d;     // LMUL=2 (kPow2=1, so 2^1=2 registers)
+ScalableTag<float, 2> d;     // LMUL=4
+HWY_FULL(float, 2) d;        // macro form: LMUL=2
+```
+
+On non-RVV targets the extra argument is accepted but has no effect.
+
+### `CappedTag<T, N>` / `HWY_CAPPED(T, N)` — at most N lanes
+
+```cpp
+CappedTag<int16_t, 4> d;     // at most 4 int16 lanes
+HWY_CAPPED(float, 8) d;      // macro equivalent
+```
+
+This selects vectors where no more than the largest power of two not exceeding `N` lanes have observable effects (loads, stores, `CountTrue`, etc.). On `HWY_SCALAR` vectors always have a single lane, regardless of `N`. Use this when your algorithm has a fixed upper bound on the data width, such as a narrow matrix column.
+
+`CappedTag<T, 3>` uses up to 2 lanes (the largest power of two ≤ 3). A loop is still required because vectors may actually be narrower.
+
+### `FixedTag<T, N>` — exactly N lanes
+
+```cpp
+FixedTag<float, 4> d;        // exactly 4 float32 lanes
+FixedTag<uint8_t, 16> d;     // exactly 16 uint8 lanes
+```
+
+This tag is for code that requires a fixed lane count. `N` must be a power of two, and must not exceed `HWY_LANES(T)`. On `HWY_SCALAR` that limit is 1, so `FixedTag` with `N > 1` is only safe when `HWY_SCALAR` is disabled or superseded. Convenience aliases exist for common 128-bit, 64-bit, and 32-bit widths:
+
+```cpp
+Full128<float>   // FixedTag<float, 4>    — 4 lanes × 32-bit = 128 bits
+Full64<float>    // FixedTag<float, 2>    — 2 lanes × 32-bit = 64 bits
+Full32<uint8_t>  // FixedTag<uint8_t, 4>  — 4 lanes × 8-bit = 32 bits
+```
+
+## Getting the lane count
+
+```cpp
+const ScalableTag<float> d;
+const size_t N = hn::Lanes(d);  // actual number of lanes at runtime
+```
+
+`Lanes(d)` returns a `size_t` and may not be `constexpr`. Use it as a loop stride, not as an array dimension:
+
+```cpp
+// Correct: dynamic allocation
+auto buf = hwy::AllocateAligned<float>(hn::Lanes(d));
+
+// Wrong: Lanes(d) may not be constexpr
+// float buf[hn::Lanes(d)];  // do not do this
+```
+
+To improve code generation on fixed-width targets, `Lanes(d)` is `constexpr` when `HWY_HAVE_CONSTEXPR_LANES` is true. Use `HWY_LANES_CONSTEXPR` in place of `constexpr` to write code that compiles correctly in both cases. Note that `HWY_HAVE_CONSTEXPR_LANES` is set to 0 in debug builds to help catch incorrect uses.
+
+The lane count is guaranteed to be a power of two, even on SVE. This simplifies computing remainders: `count & (N - 1)` instead of an expensive modulo.
+
+`MaxLanes(d)` returns a compile-time upper bound on `Lanes(d)`. It is always `constexpr` and useful for static assertions.
+
+<Warning>
+Do not cache the result of `Lanes(d)` across code boundaries where the vector length could change. On Arm SVE, the OS can change the vector length via `prctl(PR_SVE_SET_VL)`, and future Arm SME support may change it inside a function. Use the result of `Lanes(d)` only within a tight loop or basic block.
+</Warning>
+
+## Vector type aliases
+
+Because vector types are unspecified and target-dependent, use these aliases rather than spelling out concrete types:
+
+| Alias | Meaning |
+|---|---|
+| `Vec<D>` | Vector type for tag `D` |
+| `Mask<D>` | Mask type for tag `D` |
+| `TFromD<D>` | Lane type `T` from tag type `D` |
+| `DFromV<V>` | Tag type `D` from vector type `V` |
+| `TFromV<V>` | Lane type `T` from vector type `V` (= `TFromD<DFromV<V>>`) |
+
+```cpp
+const ScalableTag<float> d;
+using VF = hn::Vec<decltype(d)>;   // float vector type
+using MF = hn::Mask<decltype(d)>;  // float mask type
+
+// Get D from a vector type (for generic functions)
+template <class V>
+V Mul4(V v) {
+  return hn::Mul(v, hn::Set(hn::DFromV<V>(), 4));
+}
+```
+
+<Note>
+When working with partial vectors, pass the original tag `d` — not `DFromV<V>()` — to `Load` and `Store`. `DFromV` may lack the lane-count limit imposed by the original `CappedTag` or `FixedTag`.
+</Note>
+
+## Mixed-precision and tag manipulation
+
+When working with multiple lane types (e.g., promoting `uint8_t` to `float`), obtain narrower tags from wider ones — not independently:
+
+```cpp
+// Correct: derive the uint8 tag from the float tag
+const ScalableTag<float> df;
+const hn::Rebind<uint8_t, decltype(df)> d8;
+
+// Also useful:
+Half<D>     // half the lanes of D (result of UpperHalf / LowerHalf)
+Twice<D>    // double the lanes of D
+Rebind<T2, D>  // same lane count as D, but lane type T2
+```
+
+`RepartitionToWide<D>` and `RepartitionToNarrow<D>` change the lane type while keeping the total byte width constant.
+
+## Restrictions on RVV and SVE
+
+On RVV and SVE, vectors are **sizeless types**. You must not:
+
+- Store vectors in arrays or STL containers (use the lane type `T` instead)
+- Use vectors as class members
+- Declare `static` or `thread_local` vector variables
+- Use `new` to allocate vectors (use `AllocateAligned` instead)
+- Use `sizeof` on vectors or perform pointer arithmetic on `Vec*` (increment `T*` by `Lanes(d)` instead)
+
+These restrictions apply to `Vec<D>` and `Mask<D>` on those targets. The lane type `T` itself is always a plain scalar and has no such restrictions.

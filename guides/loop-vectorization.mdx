@@ -1,0 +1,162 @@
+---
+title: "Loop vectorization"
+description: "Strategies for vectorizing loops with Highway, including strip-mining and handling remainders."
+---
+
+Vectorizing a loop means replacing a scalar loop body with a single call to vector operations. The core challenge is handling a trip count that does not evenly divide the vector width. This guide covers the five strategies Highway offers, when to use each, and the supporting patterns that make them work.
+
+## The strip-mining model
+
+"Strip-mining" transforms a scalar loop into an outer loop and inner loop where the inner loop's iteration count matches the vector width. Highway then replaces the inner loop body with a single invocation of vector ops.
+
+Let `T` be the element type and `d = ScalableTag<T>`. The vector width `N = Lanes(d)` may not be a compile-time constant on scalable-vector targets (SVE, RVV), so avoid using it as an array size or `constexpr` value. Use `HWY_LANES_CONSTEXPR` where you need conditional constexpr behavior, or allocate dynamically:
+
+```cpp
+#include "hwy/aligned_allocator.h"
+#include "hwy/highway.h"
+
+const hn::ScalableTag<float> d;
+const size_t N = hn::Lanes(d);  // Not constexpr on SVE/RVV
+auto buf = hwy::AllocateAligned<float>(N);  // Use instead of stack array
+```
+
+The general loop body pattern used in the examples below is:
+
+```cpp
+// partial: true only for the final, potentially incomplete vector
+// max_n:   number of valid lanes when partial == true
+template <bool partial, class D>
+void LoopBody(D d, size_t index, size_t max_n);
+```
+
+## Strategy 1: Padded arrays
+
+Ensure all inputs and outputs are padded to a multiple of `N`. The loop becomes:
+
+```cpp
+for (size_t i = 0; i < count; i += N)
+  LoopBody<false>(d, i, 0);
+```
+
+The `partial` template parameter and `max_n` argument are unused.
+
+**When to use it**: This is the preferred option for almost all cases. Processing a few extra lanes beyond `count` is cheap — most SIMD architectures split vectors into 1, 2, or 4 parts, so the cost is negligible. It avoids the overhead of predication or partial loads/stores on older targets and produces the smallest code.
+
+<Tip>
+Use `hwy::AllocateAligned` for padded allocations. It guarantees alignment for `Load`/`Store` and makes it easy to allocate `count` rounded up to the next multiple of `MaxLanes(d)`.
+</Tip>
+
+## Strategy 2: Overlapping last vector
+
+Process whole vectors, but use `HWY_MIN(i, count - N)` so the final vector starts at `count - N` and covers the last `N` elements:
+
+```cpp
+for (size_t i = 0; i < count; i += N)
+  LoopBody<false>(d, HWY_MIN(i, count - N), 0);
+```
+
+**Prerequisite**: `count >= N` and `LoopBody` is idempotent (safe to call twice on the same range). Some elements may be processed twice, but only a single code path and full vectorization is needed.
+
+**When to use it**: This is the second preferred option when padding is not feasible but the two prerequisites are met. If `count < N`, padding inputs/outputs up to `N` usually makes more sense than the strategies below.
+
+## Strategy 3: Transform functions
+
+`hwy/contrib/algo/transform-inl.h` provides `Transform*` functions that handle the loop and all remainder logic for you. You supply a generic lambda (C++14) or functor that receives the current vector and returns the result to write back.
+
+Here is SAXPY (`alpha * x + y`) implemented with `Transform1`:
+
+```cpp
+#include "hwy/contrib/algo/transform-inl.h"
+
+// x[i] = alpha * x[i] + y[i]  for i in [0, n)
+Transform1(d, x, n, y, [](auto d, const auto v, const auto v1) HWY_ATTR {
+  return MulAdd(Set(d, alpha), v, v1);
+});
+```
+
+`Transform1` accepts two input/output arrays (the first doubles as output) and one additional input array. `Transform` operates on a single array; `Transform2` accepts two extra inputs.
+
+**When to use it**: Use this when your loop body fits the read-modify-write pattern. It is also the recommended approach for code that must be safe under address sanitizer (`asan`) and memory sanitizer (`msan`), because `Transform*` handles partial-vector reads without risking page faults.
+
+## Strategy 4: Scalar loop for remainders
+
+Process whole vectors first, then fall back to a scalar loop for the tail:
+
+```cpp
+size_t i = 0;
+for (; i + N <= count; i += N)
+  LoopBody<false>(d, i, 0);
+for (; i < count; ++i)
+  LoopBody<false>(CappedTag<T, 1>(), i, 0);
+```
+
+`CappedTag<T, 1>` creates a single-lane tag, so the same `LoopBody` template works for both the vectorized and scalar paths.
+
+**When to use it**: Reasonable when `count` is large (so the tail overhead is amortized) and padding or overlapping are not viable. If `count` is small, the second loop may be slower than the masked approach below, because branch prediction and loop overhead add up.
+
+## Strategy 5: Masked final iteration
+
+Process whole vectors, then handle the tail in a single masked call:
+
+```cpp
+size_t i = 0;
+for (; i + N <= count; i += N) {
+  LoopBody<false>(d, i, 0);
+}
+if (i < count) {
+  LoopBody<true>(d, i, count - i);
+}
+```
+
+Inside `LoopBody<true>`, use `FirstN` to build a mask covering only the valid lanes, then use `MaskedLoad` / `BlendedStore`:
+
+```cpp
+template <bool partial, class D>
+void LoopBody(D d, size_t index, size_t max_n) {
+  namespace hn = hwy::HWY_NAMESPACE;
+  const auto mask = partial ? hn::FirstN(d, max_n) : hn::FirstN(d, hn::Lanes(d));
+
+  // Load: zeros in masked-off lanes
+  const auto v = hn::MaskedLoad(mask, d, input + index);
+
+  // ... process v ...
+
+  // Store: only writes to the first max_n positions
+  hn::BlendedStore(result, mask, d, output + index);
+}
+```
+
+<Warning>
+`BlendedStore` and `MaskedLoad` may fault on some platforms when the pointer is near a page boundary, because the underlying instruction speculatively touches all lanes. Only use this strategy `#if !HWY_MEM_OPS_MIGHT_FAULT`.
+</Warning>
+
+**When to use it**: A good default when padding is infeasible and `LoopBody` is not idempotent. It avoids a scalar second loop: only the final iteration pays the masking cost, while all prior iterations run at full vector throughput. The increased code size from having two `LoopBody` instantiations (`partial=false` and `partial=true`) is usually worthwhile.
+
+## Choosing a strategy
+
+| Scenario | Recommended strategy |
+|---|---|
+| You control memory layout | Padded arrays (strategy 1) |
+| `count >= N` and body is idempotent | Overlapping last vector (strategy 2) |
+| Read-modify-write pattern, asan/msan safety needed | `Transform*` functions (strategy 3) |
+| Large `count`, no padding possible | Scalar remainder (strategy 4) |
+| Arbitrary `count`, non-idempotent body | Masked final iteration (strategy 5, only `#if !HWY_MEM_OPS_MIGHT_FAULT`) |
+
+## Allocating vector-compatible memory
+
+Never declare a stack array sized by `Lanes(d)` — on RVV, vectors can be up to 64 KiB (LMUL=8). Use `AllocateAligned` instead:
+
+```cpp
+#include "hwy/aligned_allocator.h"
+
+const hn::ScalableTag<float> d;
+// Allocates count floats with alignment suitable for Load/Store
+auto buf = hwy::AllocateAligned<float>(count);
+```
+
+`AllocateAligned` returns an `AlignedFreeUniquePtr` that frees memory automatically. For padded allocations, round `count` up to the next multiple of `MaxLanes(d)`:
+
+```cpp
+const size_t padded = hwy::RoundUpTo(count, hn::MaxLanes(d));
+auto buf = hwy::AllocateAligned<float>(padded);
+```

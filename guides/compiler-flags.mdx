@@ -1,0 +1,124 @@
+---
+title: "Compiler flags"
+description: "Required and recommended compiler flags for Highway on GCC, Clang, and MSVC."
+---
+
+Highway relies on inlining to achieve its performance guarantees. Compiling without optimizations causes SIMD code to run at 10–100× less than its full speed. This page covers the flags needed for each compiler and platform.
+
+## Optimization level
+
+Always compile Highway code with `-O2` or higher. Without inlining, every Highway op becomes a function call, and the overhead compounds quickly.
+
+<Tabs>
+  <Tab title="GCC / Clang">
+    `-O2` is sufficient. Highway uses target-specific attributes (`__attribute__((target(...)))`) to enable the correct instruction set for each compiled target, so you do not need to pass `-m` flags for the target architecture.
+
+    ```bash
+    g++ -O2 -std=c++17 my_file.cc -o my_binary
+    clang++ -O2 -std=c++17 my_file.cc -o my_binary
+    ```
+
+    <Note>
+    Avoid `-m` flags (e.g. `-mavx2`, `-march=native`) when using dynamic dispatch. They set a global baseline that can conflict with the per-target `#pragma` that Highway sets internally, resulting in compile errors. See [Avoiding -m flags](#avoiding--m-flags) below.
+    </Note>
+  </Tab>
+  <Tab title="MSVC">
+    MSVC does not support target-specific attributes, so additional flags are required for correct code generation.
+
+    ```
+    /O2 /Gv
+    ```
+
+    - `/O2` — enables optimization (required for the same reason as `-O2`).
+    - `/Gv` (`__vectorcall` calling convention) — allows non-inlined functions to pass vector arguments in registers. Without this, vector arguments are passed on the stack, which can significantly degrade performance when functions are not inlined.
+
+    If you use the AVX2 target together with half-width vectors (for example, `PromoteTo` from `uint8_t` to `uint16_t`), also add `/arch:AVX2`:
+
+    ```
+    /O2 /Gv /arch:AVX2
+    ```
+
+    `/arch:AVX2` is the only reliable way to make MSVC generate VEX-encoded SSE instructions when mixing SSE and AVX2. Without it, MSVC may mix VEX-encoded AVX2 instructions with non-VEX SSE instructions, causing severe performance degradation due to SSE/AVX transition penalties.
+
+    <Warning>
+    `/arch:AVX2` makes the resulting binary require AVX2 support at runtime. Do not use it if the binary must run on pre-Haswell CPUs. GCC and Clang do not need this flag because they handle VEX encoding correctly via per-target attributes.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Platform-specific flags
+
+### ARM
+
+<Tabs>
+  <Tab title="ARMv7 cross-compilation">
+    A limitation in current compilers requires an extra CMake flag when cross-compiling for ARMv7:
+
+    ```bash
+    cmake -DHWY_CMAKE_ARM7:BOOL=ON ..
+    ```
+
+    Work is underway to remove this requirement.
+  </Tab>
+  <Tab title="ARMv8 / v9 with i8mm">
+    To enable the `vusdot` and `vusdotq` dot-product instructions on ARMv8/v9, add `+i8mm` to your `-march` flag:
+
+    ```bash
+    -march=armv8.2-a+i8mm
+    ```
+
+    This is only beneficial if the target CPU actually supports the `i8mm` extension.
+  </Tab>
+</Tabs>
+
+### 32-bit x86
+
+Building on 32-bit x86 is not officially supported. AVX2 and AVX-512 are disabled by default. If you need to build in this configuration, note the following compiler-specific requirements:
+
+- **Clang 11 / 12 on Ubuntu 22.04**: add `-m32 -isystem /usr/i686-linux-gnu/include`
+- **Clang 10 and earlier**: add `-m32 -isystem /usr/i686-linux-gnu/include -isystem /usr/i686-linux-gnu/include/c++/12/i686-linux-gnu`
+- **Clang 13 and later**: not tested in this configuration
+
+## Avoiding -m flags
+
+`-m` flags (such as `-mavx2`, `-march=armv8-a+crc`) set a global baseline for the entire translation unit. When Highway's dynamic dispatch builds code for targets below that baseline, the global `-m` flag conflicts with the per-target pragma, resulting in an error like:
+
+```
+inlining failed in call to 'always_inline' ...: target specific option mismatch
+```
+
+**Recommended approach**: Omit `-m` flags entirely when using dynamic dispatch. Highway's per-target attributes handle instruction set selection automatically.
+
+If you cannot avoid `-m` flags (for example, because they are set by a build system you do not control), use one of these workarounds:
+
+<Tabs>
+  <Tab title="HWY_COMPILE_ONLY_STATIC">
+    Define `HWY_COMPILE_ONLY_STATIC` when building Highway and any user code that includes Highway headers. This disables dynamic dispatch and compiles only for the baseline target set by `-m`:
+
+    ```bash
+    clang++ -O2 -DHWY_COMPILE_ONLY_STATIC -march=armv8-a+crc my_file.cc
+    ```
+
+    You can still call `HWY_DYNAMIC_DISPATCH` — when only one target is compiled, it resolves to the same direct call as `HWY_STATIC_DISPATCH`.
+  </Tab>
+  <Tab title="HWY_SKIP_NON_BEST_BASELINE">
+    Define `HWY_SKIP_NON_BEST_BASELINE` to compile only targets at least as good as the baseline. This retains some dispatch benefit (better targets are still compiled) while avoiding conflicts with older targets:
+
+    ```bash
+    clang++ -O2 -DHWY_SKIP_NON_BEST_BASELINE -march=armv8-a+crc my_file.cc
+    ```
+  </Tab>
+</Tabs>
+
+## Summary table
+
+| Flag | Compiler | Purpose |
+|---|---|---|
+| `-O2` | GCC, Clang | Required: enables inlining (10–100× speedup vs. `-O0`) |
+| `/O2` | MSVC | Required: enables optimization |
+| `/Gv` | MSVC | Recommended: passes vector args in registers for non-inlined functions |
+| `/arch:AVX2` | MSVC | Required when using AVX2 + half-width vectors; makes binary require AVX2 |
+| `-DHWY_CMAKE_ARM7:BOOL=ON` | CMake (GCC, Clang) | Required for ARMv7 cross-compilation |
+| `+i8mm` in `-march` | GCC, Clang (ARMv8/v9) | Enables `vusdot`/`vusdotq` instructions |
+| `-DHWY_COMPILE_ONLY_STATIC` | All | Workaround when `-m` flags conflict with dynamic dispatch |
+| `-DHWY_SKIP_NON_BEST_BASELINE` | All | Compile only targets at or above the `-m`-flag baseline |

@@ -1,0 +1,195 @@
+---
+title: "Initialization"
+description: Highway operations for creating and initializing vectors.
+---
+
+Highway provides a set of operations for creating and populating vector values. All initialization ops take a tag argument `d` of type `D` (e.g. `ScalableTag<float>`) to select the lane type and vector width.
+
+## Basic initialization
+
+### `Zero`
+
+```cpp
+V Zero(D d)
+```
+
+Returns an N-lane vector with all bits set to 0.
+
+```cpp
+ScalableTag<float> d;
+auto v = Zero(d);  // all lanes == 0.0f
+```
+
+---
+
+### `Set`
+
+```cpp
+V Set(D d, T value)
+```
+
+Returns an N-lane vector with all lanes equal to `value`. `T` is the lane type of `D`.
+
+```cpp
+ScalableTag<int32_t> d;
+auto v = Set(d, 42);  // all lanes == 42
+```
+
+---
+
+### `Undefined`
+
+```cpp
+V Undefined(D d)
+```
+
+Returns an uninitialized N-lane vector. Use as an output parameter when you will immediately overwrite every lane, to avoid a wasted zeroing instruction.
+
+<Warning>
+Reading any lane of an `Undefined` vector before writing it is undefined behavior.
+</Warning>
+
+```cpp
+ScalableTag<float> d;
+auto v = Undefined(d);  // uninitialized; must write before reading
+```
+
+---
+
+### `Iota`
+
+```cpp
+V Iota(D d, T2 start)
+```
+
+Returns an N-lane vector where lane `i` equals `start + i` (converted to `T`). Lane 0 holds `start`. Useful in tests for detecting lane-crossing bugs.
+
+```cpp
+ScalableTag<uint32_t> d;
+auto v = Iota(d, 0);  // {0, 1, 2, 3, ...}
+auto w = Iota(d, 10); // {10, 11, 12, 13, ...}
+```
+
+---
+
+### `SignBit`
+
+```cpp
+V SignBit(D d)
+```
+
+Returns an N-lane vector with all lanes set to a value whose binary representation has only the most-significant bit set (the sign bit for signed and floating-point types).
+
+```cpp
+ScalableTag<float> d;
+auto v = SignBit(d);  // all lanes == -0.0f (bit pattern 0x80000000)
+```
+
+---
+
+### `Dup128VecFromValues`
+
+```cpp
+V Dup128VecFromValues(D d, T t0, .., T tK)
+```
+
+Creates a vector from `K+1` values, where `K = 16/sizeof(T) - 1`. The values `{t0, t1, ..., tK}` fill one 128-bit block, with `t0` in the lowest-indexed lane and `tK` in the highest-indexed lane. This block is then broadcast to fill the entire vector when `Lanes(d) >= 16/sizeof(T)`.
+
+```cpp
+ScalableTag<uint8_t> d;
+// Creates a vector with bytes {0,1,2,...,15} repeated in each 128-bit block
+auto v = Dup128VecFromValues(d, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15);
+```
+
+---
+
+## Conditional initialization
+
+### `MaskedSetOr`
+
+```cpp
+V MaskedSetOr(V no, M m, T a)
+```
+
+Returns an N-lane vector where lane `i` equals `a` if `m[i]` is true, otherwise `no[i]`.
+
+```cpp
+ScalableTag<float> d;
+auto no = Set(d, 0.0f);
+auto m = /* some mask */;
+auto v = MaskedSetOr(no, m, 3.14f);  // lane i = 3.14f if m[i], else 0.0f
+```
+
+---
+
+### `MaskedSet`
+
+```cpp
+V MaskedSet(D d, M m, T a)
+```
+
+Returns an N-lane vector where lane `i` equals `a` if `m[i]` is true, otherwise 0. Equivalent to `MaskedSetOr(Zero(d), m, a)`.
+
+```cpp
+ScalableTag<int32_t> d;
+auto m = /* some mask */;
+auto v = MaskedSet(d, m, 5);  // lane i = 5 if m[i], else 0
+```
+
+---
+
+## Getting and setting lanes
+
+### `GetLane`
+
+```cpp
+T GetLane(V v)
+```
+
+Returns the value of lane 0 from `v`. Commonly used to extract scalar results from reduction ops such as `SumOfLanes`.
+
+```cpp
+ScalableTag<float> d;
+auto v = Set(d, 2.0f);
+float x = GetLane(v);  // x == 2.0f
+```
+
+---
+
+### `ExtractLane`
+
+```cpp
+T ExtractLane(V v, size_t i)
+```
+
+Returns the value of lane `i` from `v`. `i` must be in `[0, Lanes(DFromV<V>()))`.
+
+<Warning>
+This operation may be slow on some platforms (e.g. x86). Prefer storing the entire vector to an aligned array and reading the elements directly when performance is critical.
+</Warning>
+
+```cpp
+ScalableTag<int32_t> d;
+auto v = Iota(d, 0);
+int32_t x = ExtractLane(v, 3);  // x == 3
+```
+
+---
+
+### `InsertLane`
+
+```cpp
+V InsertLane(V v, size_t i, T t)
+```
+
+Returns a copy of `v` with lane `i` replaced by `t`. `i` must be in `[0, Lanes(DFromV<V>()))`.
+
+<Warning>
+This operation may be slow on some platforms. Prefer setting all elements of an aligned array and then using `Load` when performance is critical.
+</Warning>
+
+```cpp
+ScalableTag<float> d;
+auto v = Zero(d);
+auto w = InsertLane(v, 2, 1.5f);  // lane 2 == 1.5f, all others == 0.0f
+```

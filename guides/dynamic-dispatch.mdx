@@ -1,0 +1,283 @@
+---
+title: "Dynamic dispatch"
+description: "Step-by-step guide to compiling for multiple CPU targets and dispatching at runtime."
+---
+
+Dynamic dispatch compiles your SIMD code once per enabled target (SSE2, AVX2, AVX-512, NEON, SVE, RVV, …) and then selects the best available implementation at runtime. You write one copy of your algorithm; Highway generates all the variants and routes calls to the fastest one the current CPU supports.
+
+## How it works
+
+Highway re-includes your `.cc` file once per target using the preprocessor. Each re-inclusion enters a unique namespace (`N_AVX2`, `N_SSE4`, etc.) to prevent ODR violations, and sets the appropriate compiler pragma so the compiler generates the right instructions. `HWY_EXPORT` builds a table of function pointers; `HWY_DYNAMIC_DISPATCH` looks up and calls the best entry.
+
+## Setting up dynamic dispatch
+
+<Steps>
+  <Step title="Define HWY_TARGET_INCLUDE">
+    At the top of your `.cc` file, before any other includes, define `HWY_TARGET_INCLUDE` with the path to the current file, then include `foreach_target.h`:
+
+    ```cpp
+    // First, undef to prevent errors on re-inclusion
+    #undef HWY_TARGET_INCLUDE
+    #define HWY_TARGET_INCLUDE "my_project/my_file.cc"
+    #include "hwy/foreach_target.h"  // IWYU pragma: keep
+    ```
+
+    `foreach_target.h` re-includes this `.cc` file once per enabled target. Everything above this include runs once; everything below runs once per target.
+  </Step>
+
+  <Step title="Include highway.h after foreach_target.h">
+    `highway.h` must come **after** `foreach_target.h`. Including it before causes redefinition errors:
+
+    ```cpp
+    // Must come after foreach_target.h
+    #include "hwy/highway.h"
+    ```
+
+    Other headers (standard library, your own project headers) may be included either before `HWY_TARGET_INCLUDE` is defined, or after `highway.h`.
+  </Step>
+
+  <Step title="Write vector code inside HWY_NAMESPACE">
+    Wrap all code that uses Highway ops in `HWY_BEFORE_NAMESPACE` / `HWY_AFTER_NAMESPACE` and place it inside `HWY_NAMESPACE`. This macro expands to a unique name per target (`N_AVX2`, `N_SSE4`, etc.) so each compiled version lives in its own namespace:
+
+    ```cpp
+    HWY_BEFORE_NAMESPACE();
+    namespace my_project {
+    namespace HWY_NAMESPACE {
+
+    namespace hn = hwy::HWY_NAMESPACE;  // alias for Highway ops
+
+    void FloorLog2(const uint8_t* HWY_RESTRICT in,
+                   size_t count,
+                   uint8_t* HWY_RESTRICT out) {
+      const hn::ScalableTag<float> df;
+      const size_t N = hn::Lanes(df);
+      size_t i = 0;
+      for (; i + N <= count; i += N) {
+        // ... vector ops using hn:: ...
+      }
+      for (; i < count; ++i) {
+        hn::CappedTag<float, 1> d1;
+        // ... scalar fallback ...
+      }
+    }
+
+    // NOLINTNEXTLINE(google-readability-namespace-comments)
+    }  // namespace HWY_NAMESPACE
+    }  // namespace my_project
+    HWY_AFTER_NAMESPACE();
+    ```
+
+    <Note>
+    `HWY_BEFORE_NAMESPACE()` sets the compiler pragma required to generate vector instructions for the current target. Lambda functions that call Highway ops also need `HWY_ATTR` before their opening brace, because the pragma does not apply to lambdas.
+    </Note>
+  </Step>
+
+  <Step title="Export the function with HWY_EXPORT">
+    Outside `HWY_NAMESPACE`, guarded by `#if HWY_ONCE`, declare the dispatch table. `HWY_ONCE` is true for exactly one of the compilation passes, ensuring the table is only emitted once:
+
+    ```cpp
+    #if HWY_ONCE
+    namespace my_project {
+
+    // Declares the dispatch table for FloorLog2
+    HWY_EXPORT(FloorLog2);
+
+    }  // namespace my_project
+    #endif  // HWY_ONCE
+    ```
+
+    `HWY_EXPORT` must be at file scope in the same outer namespace that contains the per-target implementations.
+  </Step>
+
+  <Step title="Call with HWY_DYNAMIC_DISPATCH">
+    Use `HWY_DYNAMIC_DISPATCH` to call the best available implementation. This must also be outside `HWY_NAMESPACE`:
+
+    ```cpp
+    #if HWY_ONCE
+    namespace my_project {
+
+    HWY_EXPORT(FloorLog2);
+
+    // Public entry point (can be declared in a header)
+    void CallFloorLog2(const uint8_t* in, size_t count, uint8_t* out) {
+      return HWY_DYNAMIC_DISPATCH(FloorLog2)(in, count, out);
+    }
+
+    }  // namespace my_project
+    #endif  // HWY_ONCE
+    ```
+
+    For static dispatch (single target), replace `HWY_DYNAMIC_DISPATCH` with `HWY_STATIC_DISPATCH`. The application code is otherwise identical.
+  </Step>
+</Steps>
+
+## Complete minimal example
+
+The following is the complete structure of a dynamic-dispatch `.cc` file, based on `hwy/examples/skeleton.cc`:
+
+```cpp
+#include "my_project/my_file.h"  // Your header
+
+// --- Dynamic dispatch setup ---
+#undef HWY_TARGET_INCLUDE
+#define HWY_TARGET_INCLUDE "my_project/my_file.cc"
+#include "hwy/foreach_target.h"  // IWYU pragma: keep
+
+// Must come after foreach_target.h
+#include "hwy/highway.h"
+
+// --- Per-target SIMD code ---
+HWY_BEFORE_NAMESPACE();
+namespace my_project {
+namespace HWY_NAMESPACE {
+
+namespace hn = hwy::HWY_NAMESPACE;
+
+void MyFunction(const float* HWY_RESTRICT in,
+                float* HWY_RESTRICT out,
+                size_t count) {
+  const hn::ScalableTag<float> d;
+  const size_t N = hn::Lanes(d);
+  for (size_t i = 0; i + N <= count; i += N) {
+    const auto v = hn::Load(d, in + i);
+    hn::Store(hn::Mul(v, v), d, out + i);
+  }
+}
+
+// NOLINTNEXTLINE(google-readability-namespace-comments)
+}  // namespace HWY_NAMESPACE
+}  // namespace my_project
+HWY_AFTER_NAMESPACE();
+
+// --- Dispatch table and public entry point ---
+#if HWY_ONCE
+namespace my_project {
+
+HWY_EXPORT(MyFunction);
+
+void CallMyFunction(const float* in, float* out, size_t count) {
+  return HWY_DYNAMIC_DISPATCH(MyFunction)(in, count, out);
+}
+
+}  // namespace my_project
+#endif  // HWY_ONCE
+```
+
+## Sharing code across translation units: the -inl.h pattern
+
+When you want to share vector helper functions between multiple `.cc` files (inlined, not called through function pointers), put them in a header named `*-inl.h`. These headers require a special per-target include guard instead of a normal `#pragma once` or `#ifndef` guard, because `foreach_target.h` must include them once per target.
+
+The exact guard pattern, taken from `hwy/examples/skeleton-inl.h`:
+
+```cpp
+// Per-target include guard. Replaces the normal #pragma once / #ifndef guard.
+#if defined(HIGHWAY_HWY_EXAMPLES_SKELETON_INL_H_) == defined(HWY_TARGET_TOGGLE)
+#ifdef HIGHWAY_HWY_EXAMPLES_SKELETON_INL_H_
+#undef HIGHWAY_HWY_EXAMPLES_SKELETON_INL_H_
+#else
+#define HIGHWAY_HWY_EXAMPLES_SKELETON_INL_H_
+#endif
+
+#include "hwy/highway.h"
+
+HWY_BEFORE_NAMESPACE();
+namespace my_project {
+namespace HWY_NAMESPACE {
+
+namespace hn = hwy::HWY_NAMESPACE;
+
+template <class D, typename T>
+HWY_MAYBE_UNUSED void MulAddLoop(const D d,
+                                  const T* HWY_RESTRICT mul_array,
+                                  const T* HWY_RESTRICT add_array,
+                                  const size_t size,
+                                  T* HWY_RESTRICT x_array) {
+  for (size_t i = 0; i < size; i += hn::Lanes(d)) {
+    const auto mul = hn::Load(d, mul_array + i);
+    const auto add = hn::Load(d, add_array + i);
+    auto x = hn::Load(d, x_array + i);
+    x = hn::MulAdd(mul, x, add);
+    hn::Store(x, d, x_array + i);
+  }
+}
+
+// NOLINTNEXTLINE(google-readability-namespace-comments)
+}  // namespace HWY_NAMESPACE
+}  // namespace my_project
+HWY_AFTER_NAMESPACE();
+
+#endif  // include guard
+```
+
+Highway toggles `HWY_TARGET_TOGGLE` before each re-inclusion so the guard lets the header content through exactly once per target.
+
+## Static vs. dynamic dispatch
+
+<Tabs>
+  <Tab title="Static dispatch">
+    Static dispatch targets a single instruction set — the best one enabled by your compiler flags. There is no runtime overhead and no recompilation of your code. Use it when:
+
+    - You know all target CPUs support a specific baseline (e.g. SSE4 servers).
+    - You want minimal binary size and compile time.
+    - You are embedding in a system where the CPU is fixed.
+
+    Replace `HWY_DYNAMIC_DISPATCH` with `HWY_STATIC_DISPATCH` and omit `foreach_target.h` and `HWY_EXPORT`.
+
+    If the binary runs on a CPU that does not support the targeted instruction set, it will crash.
+  </Tab>
+  <Tab title="Dynamic dispatch">
+    Dynamic dispatch compiles your code for every enabled target and picks the fastest one at runtime. Use it when:
+
+    - You distribute binaries that run on heterogeneous CPUs.
+    - You want to benefit from AVX-512 on servers while staying compatible with older CPUs.
+    - You are writing a library used by others.
+
+    The first invocation of `HWY_DYNAMIC_DISPATCH` detects the CPU. Subsequent calls reuse the cached result. Only your SIMD code is replicated, not the entire binary.
+  </Tab>
+</Tabs>
+
+## Saving the function pointer
+
+If you call the same function in a tight loop and want to avoid the table lookup overhead, save the pointer once:
+
+```cpp
+// Save during initialization
+const auto ptr = HWY_DYNAMIC_POINTER(FloorLog2);
+
+// Later, call directly — no table lookup
+ptr(in, count, out);
+```
+
+`HWY_DYNAMIC_POINTER` returns the same pointer that `HWY_DYNAMIC_DISPATCH` would select. Both trigger CPU detection on first use.
+
+## Pre-initializing dispatch
+
+The first call to `HWY_DYNAMIC_DISPATCH` (or the first use of `HWY_DYNAMIC_POINTER`) performs CPU detection. To move this overhead out of the critical path, call the following once during application startup:
+
+```cpp
+#include "hwy/highway.h"
+
+// Call before any HWY_DYNAMIC_DISPATCH invocation
+hwy::GetChosenTarget().Update(hwy::SupportedTargets());
+```
+
+After this call, all subsequent `HWY_DYNAMIC_DISPATCH` calls skip CPU detection and go directly to the selected function.
+
+## Calling target-specific implementations directly
+
+When you need to call a specific target's implementation without going through the dispatch table — for example, to test all targets in a benchmark — use `HWY_VISIT_TARGETS` to enumerate them, or call the namespaced function directly:
+
+```cpp
+// Calls the AVX2 implementation directly (bypasses dispatch)
+my_project::N_AVX2::MyFunction(in, out, count);
+```
+
+The benchmark example in `hwy/examples/benchmark.cc` demonstrates iterating over all supported targets:
+
+```cpp
+for (int64_t target : hwy::SupportedAndGeneratedTargets()) {
+  hwy::SetSupportedTargetsForTest(target);
+  HWY_DYNAMIC_DISPATCH(RunBenchmarks)();
+}
+hwy::SetSupportedTargetsForTest(0);  // Reset
+```

@@ -1,0 +1,192 @@
+---
+title: "Image utilities"
+description: "Image class with SIMD-aligned rows for efficient vector load and store operations"
+---
+
+The `image` contrib module provides a planar, single-channel image container
+whose rows are always aligned to the SIMD vector size. This lets you call
+aligned `Load`/`Store` at the start of each row without worrying about
+alignment, and avoids false sharing between threads operating on adjacent rows.
+
+## Include
+
+```cpp
+#include "hwy/contrib/image/image.h"
+```
+
+This header is a regular (non-`inl.h`) header and can be included anywhere.
+
+## `Image<T>`
+
+```cpp
+template <typename ComponentType>
+class Image : public ImageBase { /* ... */ };
+```
+
+`T` can be any POD type. The library pre-defines `hwy::ImageF` as
+`Image<float>`.
+
+### Construction
+
+```cpp
+// Allocate a width x height image of float pixels.
+hwy::ImageF img(width, height);
+
+// Wrap externally allocated memory (no ownership transfer).
+// `aligned` must be aligned to ImageBase::VectorSize() bytes.
+// `bytes_per_row` must be a multiple of VectorSize().
+hwy::ImageF img(width, height, bytes_per_row, aligned_ptr);
+```
+
+Images are move-only — copy construction and copy assignment are deleted to
+prevent accidental expensive copies. Use move semantics or store in containers
+that support move.
+
+### Dimensions
+
+```cpp
+size_t w = img.xsize();        // valid pixel columns (excluding padding)
+size_t h = img.ysize();        // rows
+size_t bpr = img.bytes_per_row(); // stride in bytes (includes padding)
+intptr_t ppr = img.PixelsPerRow(); // stride in pixels (may include padding)
+```
+
+<Warning>
+Do not use `PixelsPerRow()` or `bytes_per_row()` to determine the number of
+valid pixels in a row. Always use `xsize()` for that purpose.
+</Warning>
+
+### Row access
+
+```cpp
+// Read-only pointer to row y:
+const float* row = img.ConstRow(y);
+
+// Writable pointer to row y:
+float* row = img.MutableRow(y);
+```
+
+Each row pointer is aligned to the SIMD vector size, so you can use aligned
+`Load` at offset 0:
+
+```cpp
+const ScalableTag<float> d;
+const float* row = img.ConstRow(y);
+// Load full vectors across the row:
+for (size_t x = 0; x + Lanes(d) <= img.xsize(); x += Lanes(d)) {
+  const auto v = Load(d, row + x);   // aligned load
+  // ... process v ...
+}
+```
+
+### Row stride and padding
+
+Each row is padded to a multiple of the vector size so that a vector load
+starting at position 0 of one row never reads into the next row. This means you
+can safely read up to `PixelsPerRow()` elements per row without faulting, even
+though only the first `xsize()` elements are meaningful.
+
+Call `InitializePaddingForUnalignedAccesses()` before using `LoadU` with offsets
+that extend past `xsize() - 1` (e.g., in a convolution):
+
+```cpp
+img.InitializePaddingForUnalignedAccesses();
+```
+
+## `Image3<T>`
+
+A bundle of three same-sized `Image<T>` planes, suitable for RGB or YCbCr data:
+
+```cpp
+template <typename ComponentType>
+class Image3 { /* ... */ };
+
+using hwy::Image3F = Image3<float>;
+```
+
+### Construction and access
+
+```cpp
+hwy::Image3F rgb(width, height);
+
+// Access plane c (0, 1, or 2), row y:
+const float* row_r = rgb.ConstPlaneRow(0, y);
+float*       row_g = rgb.MutablePlaneRow(1, y);
+```
+
+All three planes share the same dimensions, enforced at construction time.
+
+## `Rect`
+
+A rectangular region within an image, defined by an origin `(x0, y0)` and a
+size:
+
+```cpp
+hwy::Rect rect(x0, y0, xsize, ysize);
+hwy::Rect full(image);   // covers the entire image
+
+// Access a row within the rect:
+const float* row = rect.ConstRow(&img, y);   // y is relative to rect
+float*       row = rect.MutableRow(&img, y);
+```
+
+`Rect` enables passing sub-regions to functions without shifting base pointers,
+which is useful when you have multiple images at different resolutions that share
+the same coordinate system.
+
+## Wrap modes
+
+The module provides coordinate wrap helpers for border handling:
+
+```cpp
+hwy::WrapMirror{}(coord, size)     // mirror-reflects out-of-bounds coords
+hwy::WrapUnchanged{}(coord, size)  // passes coord through unchanged
+```
+
+For row-pointer-based wrap (e.g., convolutions):
+
+```cpp
+hwy::WrapRowMirror wrap(image, ysize);
+const float* clamped_row = wrap(row_ptr, stride);
+```
+
+## Complete example
+
+```cpp
+#include "hwy/contrib/image/image.h"
+#include "hwy/highway.h"
+#include "hwy/foreach_target.h"
+
+HWY_BEFORE_NAMESPACE();
+namespace hwy {
+namespace HWY_NAMESPACE {
+
+// Multiply every pixel in a float image by `scale`.
+void ScaleImage(hwy::ImageF& img, float scale) {
+  const ScalableTag<float> d;
+  const auto vscale = Set(d, scale);
+
+  for (size_t y = 0; y < img.ysize(); ++y) {
+    float* HWY_RESTRICT row = img.MutableRow(y);
+    size_t x = 0;
+    for (; x + Lanes(d) <= img.xsize(); x += Lanes(d)) {
+      Store(Mul(Load(d, row + x), vscale), d, row + x);
+    }
+    // Scalar tail for remaining pixels
+    for (; x < img.xsize(); ++x) {
+      row[x] *= scale;
+    }
+  }
+}
+
+}  // namespace HWY_NAMESPACE
+}  // namespace hwy
+HWY_AFTER_NAMESPACE();
+```
+
+## Thread safety
+
+Multiple threads can safely read from the same `Image` concurrently. Concurrent
+writes to **different rows** are safe because each row is padded to a cache line
+boundary, preventing false sharing. Concurrent writes to the **same row** require
+external synchronization.

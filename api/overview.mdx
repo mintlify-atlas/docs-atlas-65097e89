@@ -1,0 +1,165 @@
+---
+title: "API overview"
+description: "High-level overview of Highway's API structure, notation, and conventions used throughout the reference."
+---
+
+## What Highway ops are
+
+Highway is a collection of *ops*: platform-agnostic pure functions that operate on tuples of values (multiple lanes of the same type). Each op is implemented using platform-specific intrinsics that map to SIMD or vector instructions. Your code calls these ops and composes them to express the desired algorithm, independent of the underlying hardware.
+
+The ops reside in `hwy::HWY_NAMESPACE`. Highway re-compiles that namespace once per enabled target when you use dynamic dispatch, so the same source produces optimized code for SSE2, AVX2, AVX-512, NEON, SVE, RVV, and other targets without any changes to your algorithm.
+
+## Notation
+
+The following shorthand appears throughout the API reference.
+
+| Symbol | Meaning |
+|--------|---------|
+| `T` | The lane type: `uint8_t`, `int16_t`, `float32_t`, `bfloat16_t`, etc. |
+| `N` | A `size_t` value that governs (but is not necessarily identical to) the number of lanes. |
+| `D` | The zero-sized tag type `Simd<T, N, kPow2>`, used to select the desired overload. Use aliases such as `ScalableTag<T>` rather than referring to this type directly. |
+| `d` | An lvalue of type `D`, passed as a function argument (e.g., to `Zero(d)`). |
+| `V` | The vector type, obtained via `Vec<D>` or `decltype(Zero(d))`. |
+| `M` | The mask type, obtained via `Mask<D>`. |
+| `v[i]` | Lane `i` of vector `v`, analogous to C++ array notation (zero-based index from the starting address). |
+
+### Lane type prefixes
+
+Constraints on which vector types an op accepts are expressed with a short prefix notation:
+
+- `u` — unsigned integer (`uint8_t`, `uint16_t`, `uint32_t`, `uint64_t`)
+- `i` — signed integer (`int8_t`, `int16_t`, `int32_t`, `int64_t`)
+- `f` — floating-point (`float16_t`, `bfloat16_t`, `float32_t`, `float64_t`)
+
+For example, `V: {u,i}{8,16}` means the op is available for unsigned and signed 8-bit and 16-bit lanes.
+
+### Vector indexing
+
+`v[i]` means the value in lane `i` of vector `v`. Lane 0 is the least-significant (lowest-address) lane. Most ops act on each lane independently; *swizzle* ops are the exception and may reorder lanes across the vector.
+
+## Tag types and obtaining `d`
+
+You never construct a vector with a constructor. Instead, you call an initialization op (such as `Set` or `Load`) and pass a *tag* `d` that specifies the desired lane type and lane count. Tags are zero-sized and impose no runtime cost.
+
+The most common tag aliases:
+
+```cpp
+// Full vector — uses all available lanes for T.
+ScalableTag<float> d;          // preferred
+HWY_FULL(float) d;             // macro form
+
+// Capped vector — at most kCap lanes have observable effects.
+CappedTag<int16_t, 4> d;
+HWY_CAPPED(int16_t, 4) d;      // macro form
+
+// Exact fixed size — exactly kCount lanes (kCount must be a power of two).
+FixedTag<uint8_t, 16> d;
+Full128<uint8_t> d;            // alias for FixedTag<uint8_t, 16>
+```
+
+Once you have a tag, obtain the lane count at runtime with `Lanes(d)`. Use this to advance loop counters:
+
+```cpp
+namespace hn = hwy::HWY_NAMESPACE;
+ScalableTag<float> d;
+const size_t N = hn::Lanes(d);
+
+for (size_t i = 0; i < count; i += N) {
+  auto v = hn::Load(d, data + i);
+  // ...
+  hn::Store(v, d, output + i);
+}
+```
+
+<Warning>
+Do not assign `Lanes(d)` to a `constexpr` variable or use it as an array dimension. On scalable vector targets (SVE, RVV) the lane count is not a compile-time constant. Use `AllocateAligned<T>(Lanes(d))` for dynamic storage.
+</Warning>
+
+## How to call Highway ops
+
+Highway functions live in `hwy::HWY_NAMESPACE`. Argument-Dependent Lookup (ADL) works for most targets but fails for function templates and targets (RVV, SVE) that use built-in vector types. Use one of these three approaches, in descending order of preference:
+
+### Namespace alias (recommended)
+
+```cpp
+namespace hn = hwy::HWY_NAMESPACE;
+
+void ProcessFloats(const float* in, float* out, size_t count) {
+  hn::ScalableTag<float> d;
+  const size_t N = hn::Lanes(d);
+  for (size_t i = 0; i < count; i += N) {
+    auto v = hn::Load(d, in + i);
+    hn::Store(hn::Add(v, hn::Set(d, 1.0f)), d, out + i);
+  }
+}
+```
+
+### Per-op `using` declarations
+
+```cpp
+using hwy::HWY_NAMESPACE::Add;
+using hwy::HWY_NAMESPACE::Load;
+using hwy::HWY_NAMESPACE::Set;
+using hwy::HWY_NAMESPACE::Store;
+```
+
+### `using namespace` directive (discouraged in headers)
+
+```cpp
+using namespace hwy::HWY_NAMESPACE;
+```
+
+This is generally discouraged, especially in headers, because it imports all Highway names into the enclosing scope.
+
+## Namespace boilerplate
+
+Wrap your vector code in Highway's `HWY_BEFORE_NAMESPACE` / `HWY_AFTER_NAMESPACE` macros and place it inside `HWY_NAMESPACE`. This sets the compiler pragma required to emit vector instructions and places each target's code in a unique namespace to prevent ODR violations.
+
+```cpp
+#include "hwy/highway.h"
+
+HWY_BEFORE_NAMESPACE();  // at file scope
+namespace project {      // optional outer namespace
+namespace HWY_NAMESPACE {
+
+void MyVectorKernel(const float* in, float* out, size_t n) {
+  namespace hn = hwy::HWY_NAMESPACE;
+  hn::ScalableTag<float> d;
+  // ... ops here ...
+}
+
+// NOLINTNEXTLINE(google-readability-namespace-comments)
+}  // namespace HWY_NAMESPACE
+}  // namespace project
+HWY_AFTER_NAMESPACE();
+```
+
+If you prefer not to use the macros, prefix every function that calls Highway ops with `HWY_ATTR`. Lambda functions always require `HWY_ATTR` before their opening brace.
+
+## Operations overview
+
+The Highway ops are organized into the following categories. Each category has a dedicated reference page.
+
+<CardGroup cols={2}>
+  <Card title="Initialization" icon="play" href="/api/ops/initialization">
+    Create vectors: `Zero`, `Set`, `Iota`, `Undefined`, `SignBit`, and more.
+  </Card>
+  <Card title="Arithmetic" icon="calculator" href="/api/ops/arithmetic">
+    Add, subtract, multiply, divide, fused multiply-add, min/max, saturating arithmetic.
+  </Card>
+  <Card title="Logical and bitwise" icon="binary" href="/api/ops/logical">
+    AND, OR, XOR, NOT, shifts, population count, bit manipulation.
+  </Card>
+  <Card title="Memory" icon="database" href="/api/ops/memory">
+    `Load`, `Store`, `Stream`, scatter/gather, masked loads and stores.
+  </Card>
+  <Card title="Comparison and masks" icon="filter" href="/api/ops/comparison">
+    `Eq`, `Lt`, `Gt`, mask logic, `IfThenElse`, `CompressStore`.
+  </Card>
+  <Card title="Swizzle and permute" icon="shuffle" href="/api/ops/swizzle">
+    Lane reordering: `Shuffle`, `Reverse`, `Broadcast`, `TableLookupBytes`, interleave.
+  </Card>
+  <Card title="Reduction" icon="sigma" href="/api/ops/reduction">
+    `SumOfLanes`, `MinOfLanes`, `MaxOfLanes`, `ReduceSum`.
+  </Card>
+</CardGroup>

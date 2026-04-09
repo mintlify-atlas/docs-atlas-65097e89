@@ -1,0 +1,96 @@
+---
+title: "Design philosophy"
+description: "Highway's design decisions, goals, and how it compares to alternative SIMD libraries"
+---
+
+Highway's design reflects a set of deliberate tradeoffs. Understanding these choices helps you use the library more effectively and explains why certain APIs look the way they do.
+
+## Core principles
+
+### Performance and portability together
+
+Performance matters — anyone using SIMD clearly cares about speed. But portability, maintainability, and readability matter too; otherwise you'd write assembly. Highway aims for performance within 10–20% of a hand-written assembly implementation on the development platform. There is no performance gap versus intrinsics: Highway code can do anything intrinsics can. When you need a platform-specific instruction, use `#if HWY_TARGET == HWY_NEON` (or similar) to access it directly.
+
+### Pay only for what you use
+
+Following the C++ guiding principle of "pay only for what you use", Highway's API ensures that operation costs are **visible, predictable, and minimal**. There are no implicit conversions or hidden overhead.
+
+### Performance portability
+
+The API must be efficient on **all** target platforms, not just the one you develop on. Common idioms for one platform can be expensive on others — for example, horizontal summation versus shuffling. Documenting which operations are expensive doesn't prevent their use in practice, as widespread use of `HADDPS` demonstrates.
+
+Rather than relying on documentation warnings, performance acceptance tests, or analysis tools, Highway provides [a carefully chosen set of vector types and operations](https://github.com/google/highway/blob/master/g3doc/instruction_matrix.pdf) that are efficient on Armv8, PPC8, and x86.
+
+### Future-proof design
+
+Future SIMD hardware features are difficult to predict. AVX2 came with surprising semantics (almost no interaction between 128-bit blocks), and AVX-512 added two kinds of predicates (writemask and zeromask). Highway takes a flexible approach: new operations are added as they become commonly available, with fallback implementations where necessary.
+
+### Masking and predication
+
+Masking behavior differs between platforms, and the important use cases beyond the ternary operator `IfThenElse` are still emerging. AVX-512 and Arm SVE zeromasks are useful but not supported by P0214R5. Highway provides `IfThen[Zero]Else[Zero]` variants to cover these cases.
+
+### Width-agnostic SIMD
+
+"Width-agnostic" SIMD is more future-proof than user-specified fixed sizes. Code that iterates over a 1D array using the library-specified vector width will automatically improve when vector sizes increase. This approach matches the direction of [Arm SVE](https://alastairreid.github.io/papers/sve-ieee-micro-2017.pdf), RISC-V V, and Agner Fog's [ForwardCom instruction set proposal](https://www.agner.org/optimize/forwardcom.pdf).
+
+For applications that require fixed sizes, Highway guarantees support for vectors up to 128 bits in each instruction set.
+
+### Compiler compatibility
+
+The API must be usable and efficient with commonly used compilers, including MSVC. For example, Highway uses `ShiftLeft<3>(v)` instead of `v << 3` because MSVC 2017 (aarch64) does not propagate the literal ([see example](https://godbolt.org/g/rKx5Ga)). Highway requires function-specific target attributes, supported by GCC 4.9, Clang 3.9, and MSVC 2015.
+
+### Efficient runtime dispatch
+
+Modules such as image or video codecs are embedded in larger applications like browsers — they cannot require separate binaries for each CPU. Libraries also can't predict whether the calling application already uses AVX2 (which incurs frequency throttling). Using the lowest-common-denominator instructions sacrifices too much performance.
+
+Highway generates code paths for multiple instruction sets and selects the most suitable one at runtime. To minimize overhead, dispatch is hoisted to higher layers rather than checked inside every low-level function. All code paths are generated from the same source, which reduces both implementation and debugging cost.
+
+### Not every CPU needs support
+
+To reduce code size and compile time, Highway groups x86 targets into clusters. In particular, SSE3 instructions are only used when SSSE3 is also available, and AVX is only used when AVX2 is also supported.
+
+### Access to platform-specific intrinsics
+
+Performance-critical projects need an escape hatch. Highway provides conversions to and from intrinsics so you can use specialized platform-specific functionality and simplify incremental porting of existing code.
+
+## Overloaded function API
+
+Most C++ vector APIs rely on class templates. However, the Arm SVE vector type is sizeless and cannot be wrapped in a class. Highway uses overloaded functions instead. Overloading based on vector types is also undesirable because SVE vectors cannot be default-constructed. Highway instead uses a dedicated tag type `Simd` for overloading, abbreviated to `D` for template arguments and `d` in lvalues.
+
+## Masks
+
+AVX-512 introduced special mask registers (one bit per lane) that serve as predicates. Forcing AVX-512 implementations to use the prior model — full vectors with lanes set to all-ones or all-zeros — would be expensive. Highway provides a `Mask` type that emulates a subset of this functionality on other platforms at zero cost.
+
+Masks are returned by comparisons and `TestBit`, and serve as the input to `IfThen*`. On targets without dedicated mask registers, `FF..FF` represents true. Highway also provides `ZeroIfNegative` to take advantage of x86 instructions that only require the sign bit of floating-point inputs to be set.
+
+## Differences from P0214R5 / `std::experimental::simd`
+
+Highway diverges from the P0214R5 proposal in several important ways:
+
+1. **Built-in vector types**: Highway uses non-member functions with built-in vector types. P0214R5 requires a wrapper class, which doesn't work for the sizeless vector types used by Arm SVE and RISC-V.
+2. **More operations**: Highway supports many operations not in P0214R5, including 128-bit compare/minmax, AES/CLMUL, `AndNot`, `AverageRound`, bit-shift by immediates, compress/expand, fixed-point mul, `IfThenElse`, interleaved load/store, lzcnt, mask find/set, masked load/store, popcount, reductions, saturated add/sub, and scatter/gather.
+3. **AVX2/AVX-512 efficiency**: The API is designed to avoid overhead from crossing 128-bit block boundaries.
+4. **No non-native vectors**: P0214R5's `simd_cast` returns `fixed_size<>` vectors that reside on the stack and are expensive to access. Highway avoids this by defining width-expanding operations as functions of a vector part — for example, promoting half a vector of `uint8_t` to a full vector of `uint16_t`.
+5. **Guaranteed intrinsic access**: Highway guarantees access to the underlying intrinsic vector type. P0214R5 only "encourages" implementations to provide this.
+6. **Safe runtime dispatch**: P0214R5 (based on the Vc library) does not assist with linking multiple instruction sets into the same binary. Highway uses target-specific namespaces and attributes to solve this safely.
+7. **No inefficient operations**: Highway omits operations like `hmax`, `operator[]`, and unsupported integer comparisons. Applications can often replace these at lower cost.
+8. **No `long double`**: These types are not commonly available in hardware.
+9. **Well-defined signed overflow**: Signed integer overflow wraps around.
+10. **No hidden conversions**: P0214R5 allows implicit integer-to-float conversions, which cost 3–4 cycles on x86. Highway makes these explicit.
+
+## Why not auto-vectorization?
+
+Auto-vectorization is convenient but unreliable. Compilers cannot always determine whether vectorization is safe or profitable, and may produce suboptimal code or silently fail to vectorize. Highway gives you direct control: every operation maps predictably to specific instructions, and the generated code does not change unexpectedly between compiler versions.
+
+## Comparison with alternative SIMD libraries
+
+| Library | Platforms | Notes |
+|---|---|---|
+| [VCL (Agner Fog)](https://github.com/vectorclass/version2) | x86 only | Complete math library; does not support ARM, RISC-V, WASM, or PPC |
+| [SIMDe](https://github.com/simd-everywhere/simde) | Cross-platform | Emulates x86 and NEON intrinsics on other platforms; useful for porting, not for new portable code |
+| [xSIMD](https://github.com/xtensor-stack/xsimd) | ARM, Power, RISC-V, WASM, x86 | Header-only; supports fewer operations than Highway |
+| [Neat SIMD](http://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=7568423) | x86 | Similar approach with interchangeable vector/scalar types; not designed for other platforms |
+| [UME::SIMD](https://goo.gl/yPeVZx) | Cross-platform | Exposes the union of all platform capabilities, resulting in a 209-page spec and ~500K LOC; less performance-portable |
+| [Inastemp](https://goo.gl/hg3USM) | x86, IBM Power8 | Scientific computing focus; only float and double; no SVE support for variable-width vectors |
+
+Highway is the only library in this comparison that targets all major platforms (x86, ARM, RISC-V, POWER, IBM Z, WebAssembly), provides efficient runtime dispatch, and enforces performance portability by design.

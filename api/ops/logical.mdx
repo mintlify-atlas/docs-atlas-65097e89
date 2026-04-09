@@ -1,0 +1,438 @@
+---
+title: "Logical and bitwise operations"
+description: Bitwise AND, OR, XOR, NOT, shifts, rotations, population count, and related operations.
+---
+
+Highway provides bitwise and logical operations that work on each lane independently. The non-operator forms (`And`, `Or`, `Xor`) must be used for floating-point types and on SVE/RVV.
+
+Type constraint notation: `{u,i}` means unsigned and signed integers; `{u,i}{8,16}` restricts to 8-bit and 16-bit lanes; `{f}` means floating-point only; `{i}` means signed integers only.
+
+## Basic bitwise operations
+
+### `And`
+
+**Type constraint**: `V`: `{u,i}` (use function form for `{f}`)
+
+```cpp
+V And(V a, V b)   // also: operator&(V a, V b)
+```
+
+Returns `a[i] & b[i]` in each lane.
+
+<Note>
+`operator&` is currently unavailable on SVE/RVV. Use `And` for portable code. For floating-point vectors, `And` (not `operator&`) must always be used.
+</Note>
+
+---
+
+### `Or`
+
+**Type constraint**: `V`: `{u,i}` (use function form for `{f}`)
+
+```cpp
+V Or(V a, V b)    // also: operator|(V a, V b)
+```
+
+Returns `a[i] | b[i]` in each lane.
+
+<Note>
+`operator|` is currently unavailable on SVE/RVV. Use `Or` for portable code.
+</Note>
+
+---
+
+### `Xor`
+
+**Type constraint**: `V`: `{u,i}` (use function form for `{f}`)
+
+```cpp
+V Xor(V a, V b)   // also: operator^(V a, V b)
+```
+
+Returns `a[i] ^ b[i]` in each lane.
+
+<Note>
+`operator^` is currently unavailable on SVE/RVV. Use `Xor` for portable code.
+</Note>
+
+---
+
+### `Not`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V Not(V v)
+```
+
+Returns `~v[i]` (bitwise complement) in each lane.
+
+---
+
+### `AndNot`
+
+```cpp
+V AndNot(V a, V b)
+```
+
+Returns `~a[i] & b[i]` in each lane.
+
+---
+
+## Three-argument bitwise operations
+
+These may be more efficient than chaining two-argument functions.
+
+### `Xor3`
+
+```cpp
+V Xor3(V x1, V x2, V x3)
+```
+
+Returns `x1[i] ^ x2[i] ^ x3[i]`. More efficient than `Or3` on some targets. When inputs are disjoint (no bit is set in more than one argument), `Xor3` and `Or3` are equivalent — prefer `Xor3` in that case.
+
+---
+
+### `Or3`
+
+```cpp
+V Or3(V o1, V o2, V o3)
+```
+
+Returns `o1[i] | o2[i] | o3[i]`. Less efficient than `Xor3` on some targets.
+
+---
+
+### `OrAnd`
+
+```cpp
+V OrAnd(V o, V a1, V a2)
+```
+
+Returns `o[i] | (a1[i] & a2[i])`.
+
+---
+
+### `XorAndNot`
+
+```cpp
+V XorAndNot(V x, V a1, V a2)
+```
+
+Returns `x[i] ^ (~a1[i] & a2[i])`. Useful for conditionally flipping bits.
+
+---
+
+### `BitwiseIfThenElse`
+
+```cpp
+V BitwiseIfThenElse(V mask, V yes, V no)
+```
+
+Returns `(mask[i] & yes[i]) | (~mask[i] & no[i])`. Equivalent to, but potentially more efficient than, `Or(And(mask, yes), AndNot(mask, no))`.
+
+---
+
+## Shifts
+
+<Note>
+Counts not in `[0, sizeof(T)*8)` yield implementation-defined results. Left-shifting signed `T` and right-shifting positive signed `T` is the same as shifting `MakeUnsigned<T>` and casting to `T`. Right-shifting negative signed `T` shifts in 1-bits.
+</Note>
+
+### Compile-time constant shifts
+
+These are generally the most efficient variant. 8-bit shifts may be slower than other lane sizes.
+
+#### `ShiftLeft<N>`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V ShiftLeft<int N>(V a)
+```
+
+Returns `a[i] << N`. `N` must be in `[0, sizeof(T)*8)`.
+
+```cpp
+ScalableTag<uint32_t> d;
+auto v = Set(d, 1u);
+auto r = ShiftLeft<3>(v);  // {8, 8, 8, ...}
+```
+
+---
+
+#### `ShiftRight<N>`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V ShiftRight<int N>(V a)
+```
+
+Returns `a[i] >> N`. `N` must be in `[0, sizeof(T)*8)`.
+
+---
+
+#### `RotateLeft<N>`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V RotateLeft<int N>(V a)
+```
+
+Returns `(a[i] << N) | (static_cast<TU>(a[i]) >> (sizeof(T)*8 - N))`.
+
+---
+
+#### `RotateRight<N>`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V RotateRight<int N>(V a)
+```
+
+Returns `(static_cast<TU>(a[i]) >> N) | (a[i] << (sizeof(T)*8 - N))`.
+
+<Note>
+`RotateRight` is often emulated using two shifts when no dedicated hardware instruction exists.
+</Note>
+
+---
+
+### Uniform runtime shifts
+
+Shift all lanes by the same amount, which need not be a compile-time constant.
+
+#### `ShiftLeftSame`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V ShiftLeftSame(V a, int bits)
+```
+
+Returns `a[i] << bits`.
+
+---
+
+#### `ShiftRightSame`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V ShiftRightSame(V a, int bits)
+```
+
+Returns `a[i] >> bits`.
+
+---
+
+### Per-lane variable shifts
+
+Each lane may shift by a different amount. These may be slow on SSSE3/SSE4, with 16-bit lanes, or for `Shr` on `i64` with AVX2.
+
+#### `Shl`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V Shl(V a, V b)   // also: operator<<(V a, V b)
+```
+
+Returns `a[i] << b[i]`.
+
+<Note>
+`operator<<` is currently unavailable on SVE/RVV. Use `Shl` for portable code.
+</Note>
+
+---
+
+#### `Shr`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V Shr(V a, V b)   // also: operator>>(V a, V b)
+```
+
+Returns `a[i] >> b[i]`.
+
+<Note>
+`operator>>` is currently unavailable on SVE/RVV. Use `Shr` for portable code.
+</Note>
+
+---
+
+#### `Rol`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V Rol(V a, V b)
+```
+
+Returns `(a[i] << (b[i] & shift_amt_mask)) | (static_cast<TU>(a[i]) >> ((sizeof(T)*8 - b[i]) & shift_amt_mask))`, where `shift_amt_mask = sizeof(T)*8 - 1`.
+
+---
+
+#### `Ror`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V Ror(V a, V b)
+```
+
+Returns `(static_cast<TU>(a[i]) >> (b[i] & shift_amt_mask)) | (a[i] << ((sizeof(T)*8 - b[i]) & shift_amt_mask))`, where `shift_amt_mask = sizeof(T)*8 - 1`.
+
+---
+
+## Masked shifts
+
+These return `0` for lanes where the mask is false.
+
+### `MaskedShiftLeft<N>`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V MaskedShiftLeft<int N>(M mask, V a)
+```
+
+Returns `a[i] << N` or `0` if `mask[i]` is false.
+
+---
+
+### `MaskedShiftRight<N>`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V MaskedShiftRight<int N>(M mask, V a)
+```
+
+Returns `a[i] >> N` or `0` if `mask[i]` is false.
+
+---
+
+### `MaskedShiftRightOr<N>`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V MaskedShiftRightOr<int N>(V no, M mask, V a)
+```
+
+Returns `a[i] >> N` or `no[i]` if `mask[i]` is false.
+
+---
+
+## Bit counting
+
+### `PopulationCount`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V PopulationCount(V a)
+```
+
+Returns the number of set bits (`popcount`) in each lane.
+
+```cpp
+ScalableTag<uint32_t> d;
+auto v = Set(d, 0b1011u);
+auto r = PopulationCount(v);  // {3, 3, 3, ...}
+```
+
+---
+
+### `LeadingZeroCount`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V LeadingZeroCount(V a)
+```
+
+Returns the number of leading zero bits in each lane. For lanes where `a[i] == 0`, returns `sizeof(TFromV<V>) * 8`.
+
+---
+
+### `TrailingZeroCount`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V TrailingZeroCount(V a)
+```
+
+Returns the number of trailing zero bits in each lane. For lanes where `a[i] == 0`, returns `sizeof(TFromV<V>) * 8`.
+
+---
+
+### `MaskedLeadingZeroCount`
+
+**Type constraint**: `V`: `{u,i}`
+
+```cpp
+V MaskedLeadingZeroCount(M m, V a)
+```
+
+Returns the result of `LeadingZeroCount` where `m[i]` is true, and zero otherwise.
+
+---
+
+## Sign-related operations
+
+### `BroadcastSignBit`
+
+**Type constraint**: `V`: `{i}`
+
+```cpp
+V BroadcastSignBit(V a)
+```
+
+Returns `-1` (all bits set) in lanes where `a[i] < 0`, or `0` otherwise. Equivalent to arithmetic right-shift by `sizeof(T)*8 - 1`.
+
+```cpp
+ScalableTag<int32_t> d;
+auto v = Set(d, -5);
+auto r = BroadcastSignBit(v);  // {-1, -1, -1, ...}
+```
+
+---
+
+### `CopySign`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V CopySign(V a, V b)
+```
+
+Returns the number with the magnitude of `a[i]` and the sign of `b[i]`.
+
+---
+
+### `CopySignToAbs`
+
+**Type constraint**: `V`: `{f}`
+
+```cpp
+V CopySignToAbs(V a, V b)
+```
+
+As `CopySign`, but potentially slightly more efficient. Requires the first argument `a` to be non-negative.
+
+---
+
+### `MaskedOr`
+
+```cpp
+V MaskedOr(M m, V a, V b)
+```
+
+Returns `a[i] | b[i]` or `0` if `m[i]` is false.

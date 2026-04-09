@@ -1,0 +1,83 @@
+---
+title: "Release testing"
+description: "How Highway tests across platforms before each release"
+---
+
+Before each release, the Highway team runs a defined set of tests across multiple platforms and compilers to verify correctness. This page describes that process.
+
+## Pre-release test matrix
+
+### Windows (x86 host)
+
+Run the Windows test script from the repository root:
+
+```bat
+run_tests.bat
+```
+
+### Linux (x86 host)
+
+Run the Linux test script, which covers Clang, GCC, and cross-compiled Arm and PPC targets:
+
+```bash
+./run_tests.sh
+```
+
+This script also covers:
+
+- **Clang and GCC** on x86 natively
+- **Arm and PPC** via GCC cross-compilation
+
+After running the script, manually test the `WASM` and `WASM_EMU256` targets, which require a browser or Node.js environment and cannot be automated in the same way.
+
+## Version updates
+
+Before tagging a release, update the version number in the following files:
+
+- `debian/changelog` — prepend a new entry
+- `hwy/base.h`
+- `CMakeLists.txt`
+- `meson.build`
+- `MODULE.bazel`
+- `g3doc/faq.md`
+
+## Signing the release
+
+Highway releases are GPG-signed for integrity verification:
+
+```bash
+git archive --prefix=highway-X.Y.Z/ -o highway-X.Y.Z.tar.gz X.Y.Z
+gpg --armor --detach-sign highway-X.Y.Z.tar.gz
+```
+
+Attach both `highway-X.Y.Z.tar.gz` and `highway-X.Y.Z.tar.gz.asc` to the GitHub release. The signing key is associated with `janwas@google.com` (before 1.3.0) or `jan.wassenberg@gmail.com` (1.3.0 and later), and can be found on `hkps://keys.openpgp.org`.
+
+See the [Debian guide to creating signed GitHub releases](https://wiki.debian.org/Creating%20signed%20GitHub%20releases) for more detail.
+
+## Running tests locally
+
+You can run Highway's test suite locally using CMake:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build
+```
+
+Or using the provided shell script at the repository root:
+
+```bash
+./run_tests.sh
+```
+
+The test suite runs each test for every Highway target supported by the current CPU. On a modern x86 machine this includes SSE2 through AVX-512 (depending on the hardware). On Arm, it covers NEON and SVE variants if available.
+
+## Non-native targets with QEMU
+
+Highway uses QEMU to run tests for architectures that the development machine does not support natively. RISC-V and Arm targets that cannot be tested on the host are verified this way.
+
+A target is considered eligible for CI testing if it can run under LLVM trunk and QEMU without extra flags. Targets that require additional flags or toolchain configuration are tested manually as part of the pre-release process rather than in CI.
+
+<Note>
+  The QEMU-based test runs are slower than native execution. If you are adding a new target or contributing a fix for a non-x86 platform, the CI results for QEMU targets may take longer to appear.
+</Note>

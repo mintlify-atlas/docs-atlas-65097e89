@@ -1,0 +1,270 @@
+---
+title: "Swizzle and permute operations"
+description: "Operations that reorder, shuffle, or rearrange vector lanes."
+---
+
+Swizzle operations rearrange lanes within or across vectors without performing arithmetic. Many are restricted to operating within independent 128-bit *blocks*, which makes them efficient on AVX2/AVX-512 targets. Operations that cross block boundaries are noted explicitly and are typically slower on those targets.
+
+## Broadcast
+
+### Broadcast within blocks
+
+`Broadcast<i>` broadcasts lane `i` of each 128-bit block to all lanes of that block. `i` must be in `[0, 16/sizeof(T))`.
+
+```cpp
+V Broadcast<int i>(V v);  // Each block: every lane = block[i]
+```
+
+### Broadcast across all blocks
+
+```cpp
+// Broadcast v[kLane] to all lanes of the result vector
+V BroadcastLane<int kLane>(V v);
+
+// Broadcast 128-bit block kBlock to all blocks (no-op for 128-bit vectors)
+V BroadcastBlock<int kBlock>(V v);
+```
+
+---
+
+## Byte-level table lookups
+
+Not available when `HWY_TARGET == HWY_SCALAR`.
+
+```cpp
+// V, VI: {u, i}
+VI TableLookupBytes   (V bytes, VI indices);  // bytes[indices[i]]; result undefined if index OOB
+VI TableLookupBytesOr0(V bytes, VI indices);  // bytes[indices[i]], or 0 if indices[i] & 0x80
+```
+
+Lookups are restricted to the first `HWY_MIN(Lanes(DFromV<V>()), 16)` bytes of each block.
+
+```cpp
+// V: {u,i}64, VI: {u,i}8
+V BitShuffle(V vals, VI indices);
+// Bit j of r[i] = (vals[i] >> indices[i*8+j]) & 1; upper 56 bits of r[i] are zeroed
+```
+
+---
+
+## Lane-level table lookups
+
+### Single-table lookup
+
+```cpp
+V TableLookupLanes(V a, unspecified indices);
+// Returns a[indices[i]]; indices must be in [0, Lanes(D()))
+// Use SetTableIndices or IndicesFromVec to prepare the indices argument
+```
+
+```cpp
+unspecified SetTableIndices(D d, TI* idx);   // Load indices from a pointer; TI is same size as T
+unspecified IndicesFromVec (D d, V idx);     // Use a vector of integer indices
+```
+
+### Two-table lookup
+
+```cpp
+V TwoTablesLookupLanes(D d, V a, V b, unspecified indices);
+// indices[i] < N  → a[indices[i]]
+// indices[i] >= N → b[indices[i] - N]
+// where N = Lanes(d)
+
+V TwoTablesLookupLanes(V a, V b, unspecified indices);
+// Equivalent to above with d = DFromV<V>()
+```
+
+### Fixed 8-element lookup
+
+```cpp
+// D: {u,i,f}{16,32,64}; only available when HWY_MIN_BYTES / sizeof(T) >= 4
+Vec<D> Lookup8(D, const TFromD<D>* tbl, VI indices);
+// Equivalent to GatherIndex but limited to 8-element tables; much more efficient
+```
+
+---
+
+## Fixed permutations within blocks
+
+Not available when `HWY_TARGET == HWY_SCALAR`.
+
+### Named shuffles (32-bit lane types)
+
+```cpp
+// V: {u,i,f}{32}
+V Shuffle1032(V v);  // 64-bit halves swapped within each block
+V Shuffle0321(V v);  // Block rotated right by 32 bits
+V Shuffle2103(V v);  // Block rotated left by 32 bits
+V Shuffle2301(V v);  // 32-bit halves swapped inside 64-bit halves (prefer Reverse2)
+V Shuffle0123(V v);  // Lanes in reverse order within each block (prefer Reverse4)
+```
+
+### Named shuffles (64-bit lane types)
+
+```cpp
+// V: {u,i,f}{64}
+V Shuffle01(V v);    // 64-bit halves swapped within each block (prefer Reverse2)
+```
+
+### Per-4-lane block shuffle
+
+```cpp
+// kIdx0..kIdx3 in [0, 3]
+V Per4LaneBlockShuffle<size_t kIdx3, size_t kIdx2, size_t kIdx1, size_t kIdx0>(V v);
+// Equivalent to TableLookupLanes with indices {kIdx0, kIdx1, kIdx2, kIdx3, kIdx0+4, ...}
+```
+
+### Even/odd lane operations
+
+```cpp
+V OddEven(V a, V b);   // Odd lanes from a, even lanes from b (within each block)
+V DupEven(V v);        // r[i] = r[i+1] = v[i] for each even i
+V DupOdd (V v);        // r[i-1] = r[i] = v[i] for each odd i  (not on HWY_SCALAR)
+```
+
+---
+
+## Reversal
+
+```cpp
+V Reverse (D, V a);   // All lanes reversed: out[i] = a[Lanes(D())-1-i]
+V Reverse2(D, V a);   // Groups of 2 lanes reversed: out[i] = a[i ^ 1]
+V Reverse4(D, V a);   // Groups of 4 lanes reversed: out[i] = a[i ^ 3]
+V Reverse8(D, V a);   // Groups of 8 lanes reversed: out[i] = a[i ^ 7]
+V ReverseBlocks(V v); // Blocks in reversed order
+
+// V: {u,i}{16,32,64}
+V ReverseLaneBytes(V a);  // Bytes within each lane reversed
+
+// V: {u,i}
+V ReverseBits(V a);       // Bits within each lane reversed
+```
+
+`ReverseN` must not be called when `Lanes(D()) < N`.
+
+---
+
+## Shift within blocks
+
+Not available when `HWY_TARGET == HWY_SCALAR`. Each operation shifts within independent 128-bit blocks.
+
+```cpp
+// V: {u, i}
+V ShiftLeftBytes <int N>([D, ] V v);   // Shift block left by N bytes [1, 15]
+V ShiftRightBytes<int N>(D, V v);      // Shift block right by N bytes [1, 15], zeros shifted in
+
+V ShiftLeftLanes <int N>([D, ] V v);   // Shift block left by N lanes
+V ShiftRightLanes<int N>(D, V v);      // Shift block right by N lanes, zeros shifted in
+
+// V: {u, i}
+V CombineShiftRightBytes<int N>(D, V hi, V lo);  // (hi[block] || lo[block]) >> N bytes [1, 16)
+V CombineShiftRightLanes<int N>(D, V hi, V lo);  // (hi[block] || lo[block]) >> N lanes [1, 16/sizeof(T))
+```
+
+---
+
+## Slide across blocks
+
+These operations shift the entire vector (across all blocks), zeroing the vacated lanes.
+
+```cpp
+V SlideUpLanes  (D d, V v, size_t N);  // v[0..Lanes-N-1] → result[N..Lanes-1]; result[0..N-1] = 0
+V SlideDownLanes(D d, V v, size_t N);  // v[N..Lanes-1] → result[0..Lanes-N-1]; upper N lanes = 0
+V Slide1Up      (D d, V v);            // Slide up by 1; returns Zero(d) if Lanes(d) == 1
+V Slide1Down    (D d, V v);            // Slide down by 1; returns Zero(d) if Lanes(d) == 1
+
+V SlideUpBlocks  <int kBlocks>(D d, V v);   // Slide up by kBlocks * (16/sizeof(T)) lanes
+V SlideDownBlocks<int kBlocks>(D d, V v);   // Slide down by kBlocks * (16/sizeof(T)) lanes
+```
+
+Results are implementation-defined when `N >= Lanes(d)`.
+
+---
+
+## Interleave
+
+Not available when `HWY_TARGET == HWY_SCALAR`. These operate within 128-bit blocks.
+
+```cpp
+V InterleaveLower([D, ] V a, V b);  // Alternate lanes from lower halves: a[0], b[0], a[1], b[1], ...
+V InterleaveUpper(D,    V a, V b);  // Alternate lanes from upper halves
+
+V InterleaveEven([D, ] V a, V b);   // a[0], b[0], a[2], b[2], ... (no block crossing)
+V InterleaveOdd (D,    V a, V b);   // a[1], b[1], a[3], b[3], ... (no block crossing)
+```
+
+`InterleaveWholeLower` and `InterleaveWholeUpper` cross block boundaries:
+
+```cpp
+V InterleaveWholeLower([D, ] V a, V b);  // Alternate from lower halves, crosses blocks
+V InterleaveWholeUpper(D,    V a, V b);  // Alternate from upper halves, crosses blocks
+```
+
+---
+
+## Zip
+
+`Zip` is identical to `Interleave*` at the bit level but reinterprets the result as double-width lanes. Useful for scalar compatibility where `InterleaveLower/Upper` is unavailable.
+
+```cpp
+// Ret: MakeWide<T>; V: {u,i}{8,16,32}
+Ret ZipLower([DW, ] V a, V b);  // Same bits as InterleaveLower, repartitioned to wider lanes
+Ret ZipUpper(DW,   V a, V b);   // Same bits as InterleaveUpper; not on HWY_SCALAR
+```
+
+---
+
+## Half-vector operations
+
+`LowerHalf` is always available. All other ops in this section require `HWY_TARGET != HWY_SCALAR`.
+
+```cpp
+V2 LowerHalf([D, ] V v);          // Lower half of v; D is Half<DFromV<V>>
+V2 UpperHalf(D, V v);             // Upper half of v; D is Half<DFromV<V>>
+V  ZeroExtendVector(D, V2 lo);    // Upper half zeroed, lower half = lo; D is Twice<DFromV<V2>>
+V  Combine(D, V2 hi, V2 lo);      // Combine two halves; D is Twice<DFromV<V2>>
+```
+
+### Cross-block concatenation
+
+These cross block boundaries; they are typically more expensive on AVX2/AVX-512.
+
+```cpp
+V ConcatLowerLower(D, V hi, V lo);  // Lower half of hi  ++ lower half of lo
+V ConcatUpperUpper(D, V hi, V lo);  // Upper half of hi  ++ upper half of lo
+V ConcatLowerUpper(D, V hi, V lo);  // Inner halves (upper of lo ++ lower of hi)
+V ConcatUpperLower(D, V hi, V lo);  // Outer quarters (no block-crossing penalty on AVX2/3)
+V ConcatOdd       (D, V hi, V lo);  // Odd lanes of hi  ++ odd lanes of lo
+V ConcatEven      (D, V hi, V lo);  // Even lanes of hi ++ even lanes of lo
+```
+
+---
+
+## Block-level permutations
+
+These operate on 128-bit blocks as units rather than individual lanes.
+
+```cpp
+V ReverseBlocks      (V v);               // Blocks in reverse order
+V OddEvenBlocks      (V a, V b);          // Odd blocks from a, even blocks from b
+V SwapAdjacentBlocks (V v);               // Swap blocks 2i and 2i+1; requires >= 2 blocks
+V BroadcastBlock<int kBlock>(V v);        // Broadcast block kBlock to all blocks
+
+// These require >= 2 blocks:
+V InterleaveEvenBlocks  (D, V a, V b);   // Block 0 from A, block 0 from B, block 2 from A, ...
+V InterleaveOddBlocks   (D, V a, V b);   // Block 1 from A, block 1 from B, ...
+V InterleaveLowerBlocks (D, V a, V b);   // Interleave all blocks from lower halves
+V InterleaveUpperBlocks (D, V a, V b);   // Interleave all blocks from upper halves
+```
+
+---
+
+## Pairwise arithmetic (within blocks)
+
+```cpp
+V PairwiseAdd128(D d, V a, V b);
+// r[i] = a[i] + a[i+1] for 64 bits, then b[i] + b[i+1] for next 64 bits, repeated per block
+
+V PairwiseSub128(D d, V a, V b);
+// r[i] = a[i] - a[i+1] for 64 bits, then b[i] - b[i+1] for next 64 bits, repeated per block
+```

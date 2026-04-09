@@ -1,0 +1,412 @@
+---
+title: "Memory operations"
+description: Loading and storing vectors — aligned, unaligned, masked, non-temporal, scatter/gather, interleaved, and cache control.
+---
+
+Highway memory operations transfer data between SIMD vectors and memory. All pointers must be element-aligned (a multiple of `sizeof(T)`) unless noted otherwise. Pointers marked `aligned` must additionally be aligned to the full vector size; use `AllocateAligned` from `hwy/aligned_allocator.h` to obtain such memory.
+
+<Note>
+Memory operands are little-endian, so their in-memory order does not depend on the lane configuration.
+</Note>
+
+<Note>
+Operations with low arithmetic intensity (e.g. dot product) can be up to 1.5× faster when memory operands are aligned to the vector size. An unaligned access may require two load ports.
+</Note>
+
+## Load
+
+### `Load`
+
+```cpp
+Vec<D> Load(D d, const T* aligned)
+```
+
+Loads `Lanes(d)` consecutive elements from `aligned`, which must be aligned to the vector size. May fault if the pointer is not sufficiently aligned.
+
+On SSSE3/SSE4, `Load` can be fused into a memory operand (unlike `LoadU`), reducing register pressure. Use this whenever the pointer is known to be aligned.
+
+```cpp
+ScalableTag<float> d;
+alignas(HWY_ALIGNMENT) float buf[/* ... */] = {/* ... */};
+auto v = Load(d, buf);
+```
+
+---
+
+### `LoadU`
+
+```cpp
+Vec<D> LoadU(D d, const T* p)
+```
+
+Loads `Lanes(d)` consecutive elements from `p`. Requires only element-aligned pointers (e.g. from `malloc` or `std::vector`).
+
+```cpp
+ScalableTag<float> d;
+std::vector<float> vec(/* ... */);
+auto v = LoadU(d, vec.data());
+```
+
+---
+
+### `LoadDup128`
+
+```cpp
+Vec<D> LoadDup128(D d, const T* p)
+```
+
+Loads one 128-bit block from `p` and broadcasts it into all 128-bit blocks of the result. Useful for constants that fit in 128 bits. Only available if `HWY_TARGET != HWY_SCALAR`.
+
+```cpp
+ScalableTag<uint8_t> d;
+const uint8_t lut[16] = {/* ... */};
+auto v = LoadDup128(d, lut);  // lut replicated across all 128-bit blocks
+```
+
+---
+
+### `MaskedLoad`
+
+```cpp
+Vec<D> MaskedLoad(M mask, D d, const T* p)
+```
+
+Returns `p[i]` where `mask[i]` is true, otherwise `0`. Equivalent to `MaskedLoadOr(Zero(d), mask, d, p)`.
+
+<Warning>
+May fault even for lanes where `mask` is false if `HWY_MEM_OPS_MIGHT_FAULT` is true. If `p` is aligned, faults can only occur if the entire vector is inaccessible.
+</Warning>
+
+---
+
+### `MaskedLoadOr`
+
+```cpp
+Vec<D> MaskedLoadOr(V no, M mask, D d, const T* p)
+```
+
+Returns `p[i]` where `mask[i]` is true, otherwise `no[i]`. Potentially more efficient than `IfThenElse(mask, LoadU(d, p), no)`.
+
+<Warning>
+May fault even for lanes where `mask` is false if `HWY_MEM_OPS_MIGHT_FAULT` is true. If `p` is aligned, faults can only occur if the entire vector is inaccessible.
+</Warning>
+
+```cpp
+ScalableTag<float> d;
+auto fallback = Zero(d);
+auto v = MaskedLoadOr(fallback, mask, d, ptr);
+```
+
+---
+
+### `LoadN`
+
+```cpp
+Vec<D> LoadN(D d, const T* p, size_t max_lanes_to_load)
+```
+
+Loads `min(Lanes(d), max_lanes_to_load)` lanes from `p` into the lowest-indexed lanes of the result, zeroing remaining lanes. Does not fault if all elements in `[p, p + max_lanes_to_load)` are accessible.
+
+---
+
+### `LoadNOr`
+
+```cpp
+Vec<D> LoadNOr(V no, D d, const T* p, size_t max_lanes_to_load)
+```
+
+Like `LoadN`, but fills remaining lanes with `no` instead of zero. Does not fault.
+
+---
+
+## Store
+
+### `Store`
+
+```cpp
+void Store(Vec<D> v, D d, T* aligned)
+```
+
+Copies `v[i]` into `aligned[i]`. The pointer must be aligned to the vector size. Writes exactly `Lanes(d) * sizeof(T)` bytes.
+
+```cpp
+ScalableTag<float> d;
+alignas(HWY_ALIGNMENT) float out[/* ... */];
+Store(v, d, out);
+```
+
+---
+
+### `StoreU`
+
+```cpp
+void StoreU(Vec<D> v, D d, T* p)
+```
+
+As `Store`, but requires only element-aligned pointers (a multiple of `sizeof(T)`).
+
+---
+
+### `BlendedStore`
+
+```cpp
+void BlendedStore(Vec<D> v, M m, D d, T* p)
+```
+
+Stores `v[i]` to `p[i]` only where `m[i]` is true. Equivalent to, but potentially more efficient than, `StoreU(IfThenElse(m, v, LoadU(d, p)), d, p)`.
+
+<Warning>
+"Blended" means this may not be atomic. Other threads must not concurrently modify `[p, p + Lanes(d))` without synchronization.
+</Warning>
+
+<Warning>
+May fault even for lanes where `mask` is false if `HWY_MEM_OPS_MIGHT_FAULT` is true. If `p` is aligned, faults can only occur if the entire vector is inaccessible.
+</Warning>
+
+---
+
+### `StoreN`
+
+```cpp
+void StoreN(Vec<D> v, D d, T* HWY_RESTRICT p, size_t max_lanes_to_store)
+```
+
+Stores the first `min(Lanes(d), max_lanes_to_store)` lanes of `v` to `p`. Does not modify any memory past `p + min(Lanes(d), max_lanes_to_store) - 1`.
+
+---
+
+## Non-temporal store
+
+### `Stream`
+
+```cpp
+void Stream(Vec<D> a, D d, const T* aligned)
+```
+
+Copies `a[i]` into `aligned[i]` with a non-temporal hint (bypasses the cache, useful for write-only data). May be implemented via a CPU-internal buffer.
+
+For correct behavior:
+- Call consecutively for an entire cache line (typically 64 bytes, aligned to its size).
+- Each call may write a multiple of `HWY_STREAM_MULTIPLE` bytes, which can exceed `Lanes(d) * sizeof(T)`.
+- The new contents of `aligned` may not be visible until `FlushStream` is called.
+
+---
+
+## Interleaved load/store
+
+These operations load or store data in a channel-interleaved layout (e.g. RGB or RGBA pixels). The result is deinterleaved into separate per-channel vectors.
+
+### `LoadInterleaved2`
+
+```cpp
+void LoadInterleaved2(D d, const T* p, Vec<D>& v0, Vec<D>& v1)
+```
+
+Equivalent to `LoadU` into `v0, v1` followed by deinterleaving, such that `v0[0] == p[0]` and `v1[0] == p[1]`.
+
+---
+
+### `LoadInterleaved3`
+
+```cpp
+void LoadInterleaved3(D d, const T* p, Vec<D>& v0, Vec<D>& v1, Vec<D>& v2)
+```
+
+As `LoadInterleaved2`, but for three channels (e.g. RGB).
+
+---
+
+### `LoadInterleaved4`
+
+```cpp
+void LoadInterleaved4(D d, const T* p, Vec<D>& v0, Vec<D>& v1, Vec<D>& v2, Vec<D>& v3)
+```
+
+As `LoadInterleaved2`, but for four channels (e.g. RGBA).
+
+---
+
+### `StoreInterleaved2`
+
+```cpp
+void StoreInterleaved2(Vec<D> v0, Vec<D> v1, D d, T* p)
+```
+
+Interleaves `v0` and `v1` and writes the result to `p`, such that `p[0] == v0[0]` and `p[1] == v1[0]`.
+
+---
+
+### `StoreInterleaved3`
+
+```cpp
+void StoreInterleaved3(Vec<D> v0, Vec<D> v1, Vec<D> v2, D d, T* p)
+```
+
+As `StoreInterleaved2`, but for three channels (e.g. RGB).
+
+---
+
+### `StoreInterleaved4`
+
+```cpp
+void StoreInterleaved4(Vec<D> v0, Vec<D> v1, Vec<D> v2, Vec<D> v3, D d, T* p)
+```
+
+As `StoreInterleaved2`, but for four channels (e.g. RGBA).
+
+---
+
+## Scatter and gather
+
+**Type constraint**: `D`: `{u,i,f}{32,64}`
+
+Offsets and indices are of type `VI = Vec<RebindToSigned<D>>`. Results are implementation-defined for negative offsets (behavior differs between x86 and RVV).
+
+<Note>
+Where possible, use `Load/Store/TableLookup*` on full vectors — this is much faster than scatter/gather. If scatter is required, consider transforming `dst[tbl[i]] = F(src[i])` to `dst[i] = F(src[tbl[i]])` because `Scatter` may be more expensive than `Gather`.
+</Note>
+
+### `GatherIndex`
+
+```cpp
+Vec<D> GatherIndex(D d, const T* base, VI indices)
+```
+
+Returns a vector of `base[indices[i]]`.
+
+```cpp
+ScalableTag<float> d;
+RebindToSigned<decltype(d)> di;
+auto idx = Set(di, 3);
+auto v   = GatherIndex(d, data, idx);  // all lanes = data[3]
+```
+
+---
+
+### `GatherOffset`
+
+```cpp
+Vec<D> GatherOffset(D d, const T* base, VI offsets)
+```
+
+Returns elements of `base` selected by *byte* offsets: `base` at `base + offsets[i]` bytes.
+
+---
+
+### `MaskedGatherIndex`
+
+```cpp
+Vec<D> MaskedGatherIndex(M mask, D d, const T* base, VI indices)
+```
+
+Returns `base[indices[i]]` where `mask[i]` is true, otherwise `0`. Does not fault for masked-off lanes. Equivalent to `MaskedGatherIndexOr(Zero(d), mask, d, base, indices)`.
+
+---
+
+### `MaskedGatherIndexOr`
+
+```cpp
+Vec<D> MaskedGatherIndexOr(V no, M mask, D d, const T* base, VI indices)
+```
+
+Returns `base[indices[i]]` where `mask[i]` is true, otherwise `no[i]`. Does not fault for masked-off lanes.
+
+---
+
+### `ScatterIndex`
+
+```cpp
+void ScatterIndex(Vec<D> v, D d, T* base, VI indices)
+```
+
+Stores `v[i]` to `base[indices[i]]`.
+
+---
+
+### `ScatterOffset`
+
+```cpp
+void ScatterOffset(Vec<D> v, D d, T* base, VI offsets)
+```
+
+Stores `v[i]` to the address `base + offsets[i]` bytes.
+
+---
+
+### `MaskedScatterIndex`
+
+```cpp
+void MaskedScatterIndex(Vec<D> v, M m, D d, T* base, VI indices)
+```
+
+Stores `v[i]` to `base[indices[i]]` only where `m[i]` is true. Does not fault for masked-off lanes.
+
+---
+
+## Aligned allocation
+
+From `hwy/aligned_allocator.h`:
+
+### `AllocateAligned`
+
+```cpp
+template <typename T>
+AlignedFreeUniquePtr<T[]> AllocateAligned(size_t items)
+```
+
+Allocates `items` elements of type `T` aligned to at least `HWY_ALIGNMENT` bytes. Returns a unique pointer that calls `FreeAlignedBytes` on destruction. Use this instead of `new` or `malloc` when the pointer will be passed to `Load`/`Store`.
+
+```cpp
+ScalableTag<float> d;
+auto buf = AllocateAligned<float>(Lanes(d));
+Store(v, d, buf.get());
+```
+
+---
+
+## Cache control
+
+All functions below except `Stream` are defined in `hwy/cache_control.h`.
+
+### `FlushStream`
+
+```cpp
+void FlushStream()
+```
+
+Ensures values written by previous `Stream` calls are visible on the current core.
+
+<Warning>
+This is NOT sufficient for synchronizing across cores. When `Stream` outputs are consumed by other cores, the producer must publish availability (e.g. via mutex or atomic flag) after calling `FlushStream`.
+</Warning>
+
+---
+
+### `Prefetch`
+
+```cpp
+template <typename T>
+void Prefetch(const T* p)
+```
+
+Optionally begins loading the cache line containing `p` to reduce the latency of subsequent loads. This is a hint; the hardware may ignore it.
+
+---
+
+### `FlushCacheLine`
+
+```cpp
+void FlushCacheLine(const void* p)
+```
+
+Invalidates and flushes the cache line containing `p`, if the platform supports it.
+
+---
+
+### `Pause`
+
+```cpp
+void Pause()
+```
+
+When called inside a spin-loop, may reduce power consumption and improve hyper-threading performance.

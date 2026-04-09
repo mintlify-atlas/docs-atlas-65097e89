@@ -1,0 +1,84 @@
+---
+title: "Introduction"
+description: "Highway C++ SIMD library overview"
+---
+
+Highway is a C++ library that provides portable SIMD/vector intrinsics. Write your algorithm once using Highway's portable ops, and the library selects the best available instruction set — either at compile time or runtime — across seven CPU architectures.
+
+## What is Highway?
+
+CPUs provide SIMD (Single Instruction, Multiple Data) instructions that apply the same operation to multiple data items in parallel. Highway gives you access to these instructions through a single, consistent C++17 API, without requiring you to write separate code paths for each CPU or architecture.
+
+Highway supports **27 targets** across seven architectures and works with four compiler families (GCC, Clang, MSVC, and Clang-CL).
+
+## Why use Highway?
+
+Using SIMD instructions through Highway typically yields:
+
+- **5–10× speedups** compared to scalar code
+- **5× lower energy usage** due to fewer instructions executed
+
+These gains come from Highway's design: its ops map directly to CPU instructions without relying on the compiler's auto-vectorization heuristics. The result is more predictable, more robust code that stays fast across compiler updates and code changes.
+
+## Design principles
+
+**Does what you expect.** Highway functions are carefully chosen to map well to CPU instructions without extensive compiler transformations. The resulting code is more predictable and robust to code changes and compiler updates than auto-vectorization.
+
+**Works on widely-used platforms.** Highway supports seven architectures. The same application code targets various instruction sets, including those with scalable vectors (size unknown at compile time). Highway only requires C++17 language features and supports four compiler families.
+
+**Flexible to deploy.** Applications using Highway can run on heterogeneous clouds or client devices, choosing the best available instruction set at runtime. Alternatively, you can target a single instruction set with no runtime overhead. In both cases, the application code is the same — just swap `HWY_STATIC_DISPATCH` with `HWY_DYNAMIC_DISPATCH` plus one line of code.
+
+**Suitable for many domains.** Highway provides an extensive set of operations used in image processing, compression, video analysis, linear algebra, cryptography, sorting, and random generation.
+
+**Rewards data-parallel design.** Highway provides tools such as `Gather`, `MaskedLoad`, and `FixedTag` to enable speedups for legacy data structures. The biggest gains come from designing algorithms and data structures around scalable vectors using techniques like batching, structure-of-arrays layouts, and aligned/padded allocations.
+
+## Supported targets
+
+Highway supports 27 targets listed below by platform:
+
+| Platform | Targets |
+|----------|---------|
+| **x86** | `SSE2`, `SSSE3`, `SSE4`, `AVX2`, `AVX3`, `AVX3_DL`, `AVX3_ZEN4`, `AVX3_SPR`, `AVX10_2` |
+| **ARM (v7+)** | `NEON_WITHOUT_AES`, `NEON`, `NEON_BF16`, `SVE`, `SVE2`, `SVE_256`, `SVE2_128` |
+| **RISC-V** | `RVV` (1.0) |
+| **POWER** | `PPC8` (v2.07), `PPC9` (v3.0), `PPC10` (v3.1B) |
+| **IBM Z** | `Z14`, `Z15` |
+| **LoongArch** | `LSX`, `LASX` |
+| **WebAssembly** | `WASM`, `WASM_EMU256` |
+| **Any** | `EMU128`, `SCALAR` |
+
+<Note>
+`SCALAR` and `EMU128` targets are always available and useful for testing — your code is always tested on at least one of these.
+</Note>
+
+## Notable users
+
+Highway is used in production across many open-source projects:
+
+- **Browsers**: Chromium (and Vivaldi), Firefox (and forks including floorp, librewolf, Waterfox)
+- **Image codecs**: JPEG XL (`libjxl`), Jpegli, Grok JPEG 2000, libaom, OpenHTJ2K
+- **Machine learning**: TensorFlow, NumPy, `gemma.cpp`
+- **Image processing**: libvips, ssimulacra2
+- **Cryptography**: google/distributed\_point\_functions, google/shell-encryption
+- **Vector search**: vespa-engine/vespa
+- **Programming runtimes**: V8, Bun, Codon (AOT-compiled Python)
+- **Computational biology**: BPCells RNA analysis, fastplong
+
+An independent evaluation concluded: *"Highway excelled with a strong performance across multiple SIMD extensions. Highway may currently be the most suitable SIMD library for many software projects."*
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Add Highway to your project via a package manager, CMake, Bazel, or Git submodule.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Write and run your first vectorized function using the skeleton example.
+  </Card>
+  <Card title="Core concepts" icon="lightbulb" href="/concepts/vector-types">
+    Understand vector tags, lane types, scalable vs. fixed-size vectors, and dispatch.
+  </Card>
+  <Card title="API reference" icon="code" href="/api/overview">
+    Browse every Highway operation with signatures and usage examples.
+  </Card>
+</CardGroup>

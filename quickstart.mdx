@@ -1,80 +1,297 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Write your first vectorized function with Highway"
 ---
 
-## Get started in three steps
+This guide walks through the `skeleton.cc` and `skeleton-inl.h` example files included in Highway's source. They demonstrate the recommended structure for a Highway project that uses dynamic dispatch.
 
-Get your documentation site running locally and make your first customization.
+<Info>
+You can find these files at `hwy/examples/skeleton.cc` and `hwy/examples/skeleton-inl.h` in the Highway repository.
+</Info>
 
-### Step 1: Set up your local environment
+## What you will build
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+You will write a vectorized `FloorLog2` function that computes the floor of the base-2 logarithm of each byte in an input array, producing one output byte per input. The example shows:
 
-### Step 2: Deploy your changes
+- The include structure required for dynamic dispatch
+- The `HWY_BEFORE_NAMESPACE` / `HWY_AFTER_NAMESPACE` pattern
+- Placing code inside `namespace HWY_NAMESPACE`
+- Loading, converting, computing, and storing vectors
+- Exporting a function for dynamic dispatch
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+## Step-by-step walkthrough
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+<Steps>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Step title="Set up the include structure">
 
-### Step 3: Go live
+A `.cc` file that uses dynamic dispatch must define `HWY_TARGET_INCLUDE` before including `foreach_target.h`. This tells the preprocessor the name of the current file so it can re-include it once per target.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+```cpp
+// hwy/examples/skeleton.cc
+
+#include "hwy/examples/skeleton.h"
+
+// >>>> for dynamic dispatch only, skip if you want static dispatch
+
+// First undef to prevent error when re-included.
+#undef HWY_TARGET_INCLUDE
+// For dynamic dispatch, specify the name of the current file (unfortunately
+// __FILE__ is not reliable) so that foreach_target.h can re-include it.
+#define HWY_TARGET_INCLUDE "hwy/examples/skeleton.cc"
+// Generates code for each enabled target by re-including this source file.
+#include "hwy/foreach_target.h"  // IWYU pragma: keep
+
+// <<<< end of dynamic dispatch
+
+// Must come after foreach_target.h to avoid redefinition errors.
+#include "hwy/highway.h"
+```
+
+<Warning>
+`highway.h` must come **after** `foreach_target.h`. Including it before causes redefinition errors because `foreach_target.h` re-includes the translation unit multiple times.
+</Warning>
+
+</Step>
+
+<Step title="Open a HWY_NAMESPACE and alias the ops namespace">
+
+Place all SIMD code between `HWY_BEFORE_NAMESPACE()` and `HWY_AFTER_NAMESPACE()`. Inside, nest your code under `namespace HWY_NAMESPACE`. This namespace name changes per target, preventing ODR (One Definition Rule) violations when multiple targets coexist in the same binary.
+
+Create an alias `hn` for `hwy::HWY_NAMESPACE` so you can write `hn::Load(...)` instead of `hwy::HWY_NAMESPACE::Load(...)`:
+
+```cpp
+// Optional, can instead add HWY_ATTR to all functions.
+HWY_BEFORE_NAMESPACE();
+
+namespace skeleton {
+// This namespace name is unique per target, which allows code for multiple
+// targets to co-exist in the same translation unit. Required when using dynamic
+// dispatch, otherwise optional.
+namespace HWY_NAMESPACE {
+namespace {
+
+// Highway ops reside here; ADL does not find templates nor builtins.
+namespace hn = hwy::HWY_NAMESPACE;
+```
+
+</Step>
+
+<Step title="Write a vectorized function">
+
+The inner helper `OneFloorLog2` takes a tag `df` describing the vector type, a pointer to input bytes, and a pointer to output bytes. It uses type tag rebinding to convert between element types while keeping the same lane count.
+
+```cpp
+// Computes log2 by converting to a vector of floats. Compiled once per target.
+template <class DF>
+HWY_ATTR_NO_MSAN void OneFloorLog2(const DF df,
+                                   const uint8_t* HWY_RESTRICT values,
+                                   uint8_t* HWY_RESTRICT log2) {
+  // Type tags for converting to other element types (Rebind = same count).
+  const hn::RebindToSigned<DF> d32;
+  const hn::Rebind<uint8_t, DF> d8;
+  using VI32 = hn::Vec<decltype(d32)>;
+
+  const VI32 vi32 = hn::PromoteTo(d32, hn::Load(d8, values));
+  const VI32 bits = hn::BitCast(d32, hn::ConvertTo(df, vi32));
+  const VI32 exponent = hn::Sub(hn::ShiftRight<23>(bits), hn::Set(d32, 127));
+  hn::Store(hn::DemoteTo(d8, exponent), d8, log2);
+}
+```
+
+The outer `FloorLog2` function drives the loop. It creates a `ScalableTag<float>` to get the largest available vector, then processes as many full vectors as possible, falling back to `CappedTag<float, 1>` (a single-lane tag) for the remainder:
+
+```cpp
+void FloorLog2(const uint8_t* HWY_RESTRICT values, size_t count,
+               uint8_t* HWY_RESTRICT log2) {
+  CodepathDemo();
+
+  const hn::ScalableTag<float> df;
+  const size_t N = hn::Lanes(df);
+  size_t i = 0;
+  for (; i + N <= count; i += N) {
+    OneFloorLog2(df, values + i, log2 + i);
+  }
+  for (; i < count; ++i) {
+    hn::CappedTag<float, 1> d1;
+    OneFloorLog2(d1, values + i, log2 + i);
+  }
+}
+
+}  // namespace
+// NOLINTNEXTLINE(google-readability-namespace-comments)
+}  // namespace HWY_NAMESPACE
+}  // namespace skeleton
+HWY_AFTER_NAMESPACE();
+```
+
+<Tip>
+`ScalableTag<T>` gives you the largest possible vector for type `T` on the current target. Use `Lanes(d)` to find out how many lanes it has at runtime.
+</Tip>
+
+</Step>
+
+<Step title="Export the function and add dynamic dispatch">
+
+After `HWY_AFTER_NAMESPACE()`, inside a `#if HWY_ONCE` guard, declare the dispatch table with `HWY_EXPORT` and expose a public function that calls `HWY_DYNAMIC_DISPATCH`:
+
+```cpp
+// The table of pointers to the various implementations in HWY_NAMESPACE must
+// be compiled only once (foreach_target #includes this file multiple times).
+// HWY_ONCE is true for only one of these 'compilation passes'.
+#if HWY_ONCE
+
+namespace skeleton {
+
+// This macro declares a static array used for dynamic dispatch; it resides in
+// the same outer namespace that contains FloorLog2.
+HWY_EXPORT(FloorLog2);
+
+// This function is optional and only needed in the case of exposing it in the
+// header file. Otherwise using HWY_DYNAMIC_DISPATCH(FloorLog2) in this module
+// is equivalent to inlining this function.
+HWY_DLLEXPORT void CallFloorLog2(const uint8_t* HWY_RESTRICT in,
+                                 const size_t count,
+                                 uint8_t* HWY_RESTRICT out) {
+  // This must reside outside of HWY_NAMESPACE because it references (calls the
+  // appropriate one from) the per-target implementations there.
+  // For static dispatch, use HWY_STATIC_DISPATCH.
+  return HWY_DYNAMIC_DISPATCH(FloorLog2)(in, count, out);
+}
+
+}  // namespace skeleton
+#endif  // HWY_ONCE
+```
+
+`HWY_DYNAMIC_DISPATCH` selects the best implementation for the current CPU at the first call, using a table of function pointers built by `HWY_EXPORT`. Subsequent calls go through the cached pointer.
+
+</Step>
+
+<Step title="Share code across modules with -inl.h headers">
+
+When you want to call a helper function from multiple `.cc` files — and still have it inlined rather than called through a function pointer — put it in a `-inl.h` header with a special per-target include guard.
+
+The `skeleton-inl.h` example shows the pattern:
+
+```cpp
+// Per-target include guard. This is only required when using dynamic dispatch,
+// i.e. including foreach_target.h. For static dispatch, a normal include
+// guard would be fine because the header is only compiled once.
+#if defined(HIGHWAY_HWY_EXAMPLES_SKELETON_INL_H_) == defined(HWY_TARGET_TOGGLE)
+#ifdef HIGHWAY_HWY_EXAMPLES_SKELETON_INL_H_
+#undef HIGHWAY_HWY_EXAMPLES_SKELETON_INL_H_
+#else
+#define HIGHWAY_HWY_EXAMPLES_SKELETON_INL_H_
+#endif
+
+// It is fine to #include normal or *-inl headers.
+#include "hwy/highway.h"
+
+HWY_BEFORE_NAMESPACE();
+namespace skeleton {
+namespace HWY_NAMESPACE {
+
+// Highway ops reside here; ADL does not find templates nor builtins.
+namespace hn = hwy::HWY_NAMESPACE;
+
+// Example of a type-agnostic (caller-specified lane type) and width-agnostic
+// (uses best available instruction set) function in a header.
+//
+// Computes x[i] = mul_array[i] * x_array[i] + add_array[i] for i < size.
+template <class D, typename T>
+HWY_MAYBE_UNUSED void MulAddLoop(const D d, const T* HWY_RESTRICT mul_array,
+                                 const T* HWY_RESTRICT add_array,
+                                 const size_t size, T* HWY_RESTRICT x_array) {
+  for (size_t i = 0; i < size; i += hn::Lanes(d)) {
+    const auto mul = hn::Load(d, mul_array + i);
+    const auto add = hn::Load(d, add_array + i);
+    auto x = hn::Load(d, x_array + i);
+    x = hn::MulAdd(mul, x, add);
+    hn::Store(x, d, x_array + i);
+  }
+}
+
+// NOLINTNEXTLINE(google-readability-namespace-comments)
+}  // namespace HWY_NAMESPACE
+}  // namespace skeleton
+HWY_AFTER_NAMESPACE();
+
+#endif  // include guard
+```
+
+The guard uses `HWY_TARGET_TOGGLE` instead of a simple `#ifndef`. Highway defines and undefines `HWY_TARGET_TOGGLE` between re-inclusions so that the header is compiled exactly once per target.
+
+</Step>
+
+<Step title="Build the example with CMake">
+
+The skeleton example is built as part of Highway's test suite. To build it:
+
+```bash
+mkdir -p build && cd build
+cmake ..
+make -j skeleton_test
+```
+
+To build all examples:
+
+```bash
+cmake -DHWY_ENABLE_EXAMPLES=ON ..
+make -j hwy_benchmark
+```
+
+Your own project can follow the same CMake pattern:
+
+```cmake
+cmake_minimum_required(VERSION 3.10)
+project(my_project)
+
+find_package(HWY 1.3.0 REQUIRED)
+
+add_executable(my_binary my_file.cc)
+target_compile_features(my_binary PRIVATE cxx_std_17)
+target_compile_options(my_binary PRIVATE -O2)
+target_link_libraries(my_binary PRIVATE hwy)
+```
+
+<Warning>
+Always compile with `-O2` or higher. Highway inlines aggressively, and without optimization SIMD code can be 10–100× slower than expected.
+</Warning>
+
+</Step>
+
+</Steps>
+
+## Static vs. dynamic dispatch
+
+Highway supports two dispatch modes. You switch between them by changing a single macro call:
+
+| Mode | Macro | When to use |
+|------|-------|-------------|
+| **Dynamic** | `HWY_DYNAMIC_DISPATCH(func)(args)` | Heterogeneous deployments: compile once, run on any CPU, pick the best target at runtime. |
+| **Static** | `HWY_STATIC_DISPATCH(func)(args)` | Known-homogeneous deployments: target a single instruction set, no runtime overhead. |
+
+For dynamic dispatch, also define `HWY_TARGET_INCLUDE` and include `foreach_target.h` as shown above. For static dispatch, omit those lines — Highway uses whatever targets the compiler enables via `-m` flags.
+
+<Tip>
+Even if you plan to use only static dispatch, Highway recommends placing your code inside `namespace HWY_NAMESPACE` so you can switch to dynamic dispatch later without restructuring.
+</Tip>
+
+See [Dispatch](/concepts/dispatch) for a detailed explanation of how target selection works.
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Core concepts" icon="lightbulb" href="/concepts/vector-types">
+    Learn about vector tags, lane types, and the ScalableTag/FixedTag/CappedTag distinction.
+  </Card>
+  <Card title="Dynamic dispatch guide" icon="shuffle" href="/guides/dynamic-dispatch">
+    Step-by-step guide to using `foreach_target.h` and `HWY_DYNAMIC_DISPATCH`.
+  </Card>
+  <Card title="Loop vectorization" icon="repeat" href="/guides/loop-vectorization">
+    Strategies for strip-mining loops and handling non-divisible trip counts.
+  </Card>
+  <Card title="API reference" icon="code" href="/api/overview">
+    Browse every Highway operation with signatures and usage examples.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

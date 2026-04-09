@@ -1,0 +1,217 @@
+---
+title: "Comparison and mask operations"
+description: "Comparison operators that produce masks, and operations that use masks for conditional logic."
+---
+
+Comparison operations return a `Mask<D>` — a per-lane boolean result whose encoding is platform-specific. You then use that mask with the operations in this page to perform conditional selection, counting, compression, and more.
+
+## Comparisons
+
+These return a mask indicating whether the condition is true for each lane.
+
+### Element-wise comparisons
+
+```cpp
+// Operator forms — unavailable on SVE/RVV; prefer the named equivalents
+M operator==(V a, V b);  // a[i] == b[i]
+M operator!=(V a, V b);  // a[i] != b[i]
+M operator< (V a, V b);  // a[i] <  b[i]
+M operator> (V a, V b);  // a[i] >  b[i]
+M operator<=(V a, V b);  // a[i] <= b[i]
+M operator>=(V a, V b);  // a[i] >= b[i]
+
+// Named forms — available on all targets including SVE/RVV
+M Eq(V a, V b);   // a[i] == b[i]
+M Ne(V a, V b);   // a[i] != b[i]
+M Lt(V a, V b);   // a[i] <  b[i]
+M Gt(V a, V b);   // a[i] >  b[i]
+M Le(V a, V b);   // a[i] <= b[i]
+M Ge(V a, V b);   // a[i] >= b[i]
+```
+
+<Note>
+On SVE and RVV targets the operator forms (`==`, `!=`, `<`, etc.) are not available. Use the named function forms (`Eq`, `Ne`, `Lt`, etc.) to keep code portable.
+</Note>
+
+### Sign test
+
+```cpp
+// V: {i, f}
+M IsNegative(V v);  // v[i] < 0
+```
+
+Equivalent to `Lt(v, Zero(d))` but more efficient on some targets.
+
+### Bit test
+
+```cpp
+// V: {u, i}
+M TestBit(V v, V bit);  // (v[i] & bit[i]) == bit[i]
+```
+
+Each element of `bit` must have exactly one bit set.
+
+### 128-bit comparisons
+
+These operate on pairs of adjacent `u64` lanes that together form a 128-bit integer. Not available when `HWY_TARGET == HWY_SCALAR`. Each pair of result lanes is either both true or both false.
+
+```cpp
+// V: u64 only
+M Lt128     (D, V a, V b);  // a[1]:a[0]  <  b[1]:b[0]  (unsigned 128-bit)
+M Lt128Upper(D, V a, V b);  // a[1]       <  b[1]        (upper 64-bit key)
+M Eq128     (D, V a, V b);  // a[1]:a[0] ==  b[1]:b[0]
+M Ne128     (D, V a, V b);  // a[1]:a[0] !=  b[1]:b[0]
+M Eq128Upper(D, V a, V b);  // a[1]      ==  b[1]
+M Ne128Upper(D, V a, V b);  // a[1]      !=  b[1]
+```
+
+### Masked comparisons
+
+These return `false` for lanes where the input mask is false, and are potentially more efficient than `And(m, Eq(a, b))`.
+
+```cpp
+M MaskedEq(M m, V a, V b);  // m[i] ? a[i] == b[i] : false
+M MaskedNe(M m, V a, V b);  // m[i] ? a[i] != b[i] : false
+M MaskedLt(M m, V a, V b);  // m[i] ? a[i] <  b[i] : false
+M MaskedGt(M m, V a, V b);  // m[i] ? a[i] >  b[i] : false
+M MaskedLe(M m, V a, V b);  // m[i] ? a[i] <= b[i] : false
+M MaskedGe(M m, V a, V b);  // m[i] ? a[i] >= b[i] : false
+```
+
+---
+
+## Creating masks
+
+```cpp
+M FirstN(D, size_t n);          // First n lanes true, remainder false
+M MaskFalse(D);                  // All lanes false (more efficient than FirstN(d, 0))
+M SetMask(D, bool val);          // All lanes set to val
+M MaskFromVec(V v);              // false if v[i] == 0, true if v[i] has all bits set
+M LoadMaskBits(D, const uint8_t* p);  // Lane i is true if bit i of p is set
+M Dup128MaskFromMaskBits(D d, unsigned mask_bits);  // Lane i = (mask_bits >> (i % (16/sizeof(T)))) & 1
+```
+
+### Converting masks to and from vectors
+
+```cpp
+V   VecFromMask(D, M m);          // 0 if m[i] false, all-bits-set if m[i] true
+uint64_t BitsFromMask(D, M m);    // Bit i of result = m[i]; only when HWY_MAX_BYTES <= 64
+size_t   StoreMaskBits(D, M m, uint8_t* p);  // Store m as a bit array; returns bytes written
+M1  RebindMask(D, M2 m);          // Reinterpret mask bits for a different lane type
+```
+
+### Promoting and demoting masks
+
+```cpp
+// Widen mask to a wider lane type
+Mask<DTo> PromoteMaskTo(DTo d_to, DFrom d_from, Mask<DFrom> m);
+
+// Narrow mask to a narrower lane type
+Mask<DTo> DemoteMaskTo(DTo d_to, DFrom d_from, Mask<DFrom> m);
+
+// Combine two half-width masks into one full-width mask
+M  CombineMasks(D, M2 hi, M2 lo);              // Not available if HWY_TARGET == HWY_SCALAR
+M2 LowerHalfOfMask(D d, M m);
+M2 UpperHalfOfMask(D d, M m);                  // Not available if HWY_TARGET == HWY_SCALAR
+
+// Ordered combine of two masks with demotion
+M  OrderedDemote2MasksTo(DTo, DFrom, M2, M2);  // Not available if HWY_TARGET == HWY_SCALAR
+```
+
+### Sliding masks
+
+```cpp
+M SlideMaskUpLanes  (D d, M m, size_t N);   // Shift mask up N lanes
+M SlideMaskDownLanes(D d, M m, size_t N);   // Shift mask down N lanes
+M SlideMask1Up      (D d, M m);             // Shift mask up 1 lane
+M SlideMask1Down    (D d, M m);             // Shift mask down 1 lane
+```
+
+---
+
+## Logical mask operations
+
+```cpp
+M Not  (M m);             // ~m[i]
+M And  (M a, M b);        // a[i] && b[i]
+M AndNot(M not_a, M b);   // !not_a[i] && b[i]
+M Or   (M a, M b);        // a[i] || b[i]
+M Xor  (M a, M b);        // a[i] ^ b[i]
+M ExclusiveNeither(M a, M b);  // !a[i] && !b[i]; undefined if both true
+```
+
+### Prefix/suffix mask utilities
+
+```cpp
+M SetOnlyFirst       (M m);  // Keep only the first true lane; others become false
+M SetBeforeFirst     (M m);  // Set all lanes before the first true lane to true
+M SetAtOrBeforeFirst (M m);  // Equivalent to Or(SetBeforeFirst(m), SetOnlyFirst(m))
+M SetAtOrAfterFirst  (M m);  // Equivalent to Not(SetBeforeFirst(m))
+```
+
+---
+
+## Testing masks
+
+```cpp
+bool     AllTrue        (D, M m);            // All lanes true?
+bool     AllFalse       (D, M m);            // All lanes false?
+size_t   CountTrue      (D, M m);            // Number of true lanes [0, N]
+intptr_t FindFirstTrue  (D, M m);            // Index of first true lane, or -1
+size_t   FindKnownFirstTrue(D, M m);         // Like FindFirstTrue but requires !AllFalse
+intptr_t FindLastTrue   (D, M m);            // Index of last true lane, or -1
+size_t   FindKnownLastTrue (D, M m);         // Like FindLastTrue but requires !AllFalse
+```
+
+<Tip>
+Prefer `FindKnownFirstTrue` / `FindKnownLastTrue` over `FindFirstTrue` / `FindLastTrue` when you have already verified the mask is not all-false. They are typically more efficient.
+</Tip>
+
+---
+
+## Conditional selection
+
+`IfThen*` masks must satisfy the invariant set by `MaskFromVec`: false is zero, true has all bits set.
+
+```cpp
+V IfThenElse    (M mask, V yes, V no);   // mask[i] ? yes[i] : no[i]
+V IfThenElseZero(M mask, V yes);         // mask[i] ? yes[i] : 0
+V IfThenZeroElse(M mask, V no);          // mask[i] ? 0      : no[i]
+
+// Operates on a vector mask (bits) instead of a mask type
+// Result is implementation-defined if mask[i] is neither zero nor all-bits-set
+V IfVecThenElse (V mask, V yes, V no);
+```
+
+---
+
+## Compress and expand
+
+### Compress
+
+`Compress` packs lanes whose mask is true into the lower lanes of the result. Whether `CompressIsPartition<T>::value` is true determines whether the mask-false lanes are moved to the upper half (partition semantics) or left implementation-defined.
+
+<Warning>
+`Compress` and `CompressStore` can be slow for 8-bit and 16-bit lane types on some targets.
+</Warning>
+
+```cpp
+V      Compress     (V v, M m);                          // Pack true lanes into lower lanes
+V      CompressNot  (V v, M m);                          // Equivalent to Compress(v, Not(m))
+V      CompressBlocksNot(V v, M m);                      // V: u64; pairs must be same mask value
+
+size_t CompressStore      (V v, M m, D d, T* p);         // Write true lanes to p; returns count
+size_t CompressBlendedStore(V v, M m, D d, T* p);        // Write true lanes only; no overwrite
+
+V      CompressBits     (V v, const uint8_t* HWY_RESTRICT bits);
+size_t CompressBitsStore(V v, const uint8_t* HWY_RESTRICT bits, D d, T* p);
+```
+
+### Expand
+
+`Expand` is the inverse of `Compress`: it scatters the input lanes into the positions selected by the mask and zeros the rest.
+
+```cpp
+V      Expand    (V v, M m);              // Scatter v[0..k] to mask-true positions, zero others
+V      LoadExpand(M m, D d, const T* p);  // Load p[0..k] to mask-true positions, zero others
+```

@@ -1,0 +1,141 @@
+---
+title: "Math functions"
+description: "SIMD-accelerated transcendental math functions for float and double vectors"
+---
+
+`math-inl.h` provides SIMD implementations of common transcendental functions —
+sin, cos, exp, log, and more — for `float32` and `float64` lanes. Because it is
+an `-inl.h` header, you include it inside a Highway namespace block so that it
+compiles once per enabled target.
+
+## Include
+
+```cpp
+// Inside a file that uses HWY_BEFORE_NAMESPACE / HWY_AFTER_NAMESPACE:
+#include "hwy/contrib/math/math-inl.h"
+```
+
+<Warning>
+`math-inl.h` must be included **inside** `HWY_NAMESPACE` (after
+`HWY_BEFORE_NAMESPACE()` and before `HWY_AFTER_NAMESPACE()`). Including it at
+the top level will produce compile errors.
+</Warning>
+
+## Usage pattern
+
+```cpp
+#include "hwy/highway.h"
+#include "hwy/foreach_target.h"
+
+// Per-target section
+#include "hwy/contrib/math/math-inl.h"
+
+HWY_BEFORE_NAMESPACE();
+namespace hwy {
+namespace HWY_NAMESPACE {
+
+void ComputeSines(const float* HWY_RESTRICT in, float* HWY_RESTRICT out,
+                  size_t count) {
+  const ScalableTag<float> d;
+  const size_t N = Lanes(d);
+  for (size_t i = 0; i + N <= count; i += N) {
+    const auto v = LoadU(d, in + i);
+    StoreU(Sin(d, v), d, out + i);
+  }
+}
+
+}  // namespace HWY_NAMESPACE
+}  // namespace hwy
+HWY_AFTER_NAMESPACE();
+```
+
+## Function reference
+
+All functions live in `hwy::HWY_NAMESPACE`. They take a descriptor `d` and one
+or more vectors, and return a vector of the same type. Every function supports
+`float32` and, where `HWY_HAVE_FLOAT64` is true, `float64`.
+
+### Trigonometric
+
+| Function | Signature | Max error | Valid range |
+|---|---|---|---|
+| `Sin` | `V Sin(D d, V x)` | 3 ULP | `[-39000, +39000]` |
+| `Cos` | `V Cos(D d, V x)` | 3 ULP | `[-39000, +39000]` |
+| `SinCos` | `void SinCos(D d, V x, V& s, V& c)` | 1 ULP | `[-39000, +39000]` |
+
+`SinCos` computes sine and cosine simultaneously with roughly the same cost as
+calling `Sin` alone.
+
+### Inverse trigonometric
+
+| Function | Signature | Max error | Valid range |
+|---|---|---|---|
+| `Asin` | `V Asin(D d, V x)` | 2 ULP | `[-1, +1]` |
+| `Acos` | `V Acos(D d, V x)` | 2 ULP | `[-1, +1]` |
+| `Atan` | `V Atan(D d, V x)` | 3 ULP | `[-FLT_MAX, +FLT_MAX]` |
+| `Atan2` | `V Atan2(D d, V y, V x)` | — | full range |
+
+`Atan2` correctly handles negative zero, infinities, and NaN.
+
+### Hyperbolic
+
+| Function | Signature | Max error | Valid range (float32 / float64) |
+|---|---|---|---|
+| `Sinh` | `V Sinh(D d, V x)` | 4 ULP | `[-88.72, +88.72]` / `[-709, +709]` |
+| `Tanh` | `V Tanh(D d, V x)` | 4 ULP | full range |
+| `Asinh` | `V Asinh(D d, V x)` | 3 ULP | full range |
+| `Acosh` | `V Acosh(D d, V x)` | 3 ULP | `[1, +FLT_MAX]` / `[1, +DBL_MAX]` |
+| `Atanh` | `V Atanh(D d, V x)` | 3 ULP | `(-1, +1)` |
+
+### Hypot
+
+```cpp
+V Hypot(D d, V a, V b);  // sqrt(a*a + b*b), max error: 4 ULP
+```
+
+### Exponential and logarithm
+
+| Function | Signature | Max error | Valid range (float32 / float64) |
+|---|---|---|---|
+| `Exp` | `V Exp(D d, V x)` | 1 ULP | `[-FLT_MAX, +104]` / `[-DBL_MAX, +706]` |
+| `Exp2` | `V Exp2(D d, V x)` | 2 ULP | `[-FLT_MAX, +128]` / `[-DBL_MAX, +1024]` |
+| `Expm1` | `V Expm1(D d, V x)` | 4 ULP | same as `Exp` |
+| `Log` | `V Log(D d, V x)` | 4 ULP | `(0, +FLT_MAX]` / `(0, +DBL_MAX]` |
+| `Log2` | `V Log2(D d, V x)` | 2 ULP | same as `Log` |
+| `Log10` | `V Log10(D d, V x)` | 2 ULP | same as `Log` |
+| `Log1p` | `V Log1p(D d, V x)` | 2 ULP | `[0, +FLT_MAX]` / `[0, +DBL_MAX]` |
+
+## Example: computing exp on a large array
+
+```cpp
+#include "hwy/highway.h"
+#include "hwy/foreach_target.h"
+#include "hwy/contrib/math/math-inl.h"
+#include "hwy/contrib/algo/transform-inl.h"
+
+HWY_BEFORE_NAMESPACE();
+namespace hwy {
+namespace HWY_NAMESPACE {
+
+void ExpArray(float* HWY_RESTRICT inout, size_t count) {
+  const ScalableTag<float> d;
+  Transform(d, inout, count,
+            [](auto d, const auto v) HWY_ATTR { return Exp(d, v); });
+}
+
+}  // namespace HWY_NAMESPACE
+}  // namespace hwy
+HWY_AFTER_NAMESPACE();
+```
+
+## Accuracy notes
+
+Error bounds are given in ULP (units in the last place), a measure of floating-
+point rounding error relative to the true mathematical result. 1 ULP means the
+result differs from the exact value by at most one representable floating-point
+increment. Functions are implemented using Estrin's scheme for polynomial
+evaluation, which enables superscalar execution on out-of-order CPUs.
+
+All functions in `math-inl.h` support both `float32` and `float64` via template
+specialization. `float64` overloads are only compiled when
+`HWY_HAVE_FLOAT64 && HWY_HAVE_INTEGER64` is true.

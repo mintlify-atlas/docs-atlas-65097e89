@@ -1,97 +1,130 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Highway — Performance-Portable SIMD"
+description: "A C++ library for portable SIMD/vector intrinsics with runtime CPU dispatch across 27 targets: x86 (SSE2–AVX-512), ARM (NEON/SVE/SVE2), RISC-V, POWER, IBM Z, and WebAssembly."
 ---
 
-## Setting up
+Highway is a C++ library that lets you write SIMD code once and run it optimally on any CPU. Write your algorithm using Highway's portable ops, and Highway automatically selects the best available instruction set at runtime — from SSE2 to AVX-512 on x86, NEON to SVE2 on ARM, and beyond.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Add Highway to your project via CMake, Bazel, vcpkg, or as a Git submodule.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Write and run your first vectorized function in minutes.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Core Concepts" icon="lightbulb" href="/concepts/vector-types">
+    Understand vector tags, lane types, scalable vs. fixed-size vectors.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Browse every Highway operation with signatures and usage examples.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why Highway?
 
-Everything you need to create world-class documentation.
+Highway gives you **5–10× speedups** over scalar code with **5× lower energy usage** by mapping directly to CPU SIMD instructions — no auto-vectorization guesswork.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Runtime dispatch" icon="bolt">
+    Compile once for all targets. Highway picks the fastest path at runtime — AVX-512, AVX2, NEON, SVE, RVV — with no code changes required.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="27 CPU targets" icon="microchip">
+    Supports x86 (SSE2 through AVX-512), ARM (NEON, SVE, SVE2), RISC-V (RVV), POWER (PPC8/9/10), IBM Z (Z14/Z15), and WebAssembly.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Length-agnostic vectors" icon="arrows-left-right">
+    Write algorithms that work on both fixed-width (SSE, NEON) and scalable vectors (SVE, RVV) without separate code paths.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Zero-overhead abstraction" icon="gauge-high">
+    Highway ops map directly to CPU instructions. The resulting code is predictable and robust to compiler updates.
   </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## Get started
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Install Highway">
+    Add Highway to your project. The fastest path is via a package manager:
+    ```bash
+    # Debian/Ubuntu
+    sudo apt install libhwy-dev
+
+    # vcpkg
+    vcpkg install highway
+    ```
+    See [Installation](/installation) for CMake, Bazel, and Git submodule instructions.
+  </Step>
+  <Step title="Write your vector function">
+    Create a `.cc` file with your SIMD logic inside `HWY_NAMESPACE`:
+    ```cpp
+    #include "hwy/highway.h"
+    HWY_BEFORE_NAMESPACE();
+    namespace project {
+    namespace HWY_NAMESPACE {
+    namespace hn = hwy::HWY_NAMESPACE;
+
+    void MultiplyAdd(const float* HWY_RESTRICT a,
+                     const float* HWY_RESTRICT b,
+                     const float* HWY_RESTRICT c,
+                     float* HWY_RESTRICT out, size_t count) {
+      const hn::ScalableTag<float> d;
+      const size_t N = hn::Lanes(d);
+      for (size_t i = 0; i < count; i += N) {
+        auto va = hn::Load(d, a + i);
+        auto vb = hn::Load(d, b + i);
+        auto vc = hn::Load(d, c + i);
+        hn::Store(hn::MulAdd(va, vb, vc), d, out + i);
+      }
+    }
+
+    }  // namespace HWY_NAMESPACE
+    }  // namespace project
+    HWY_AFTER_NAMESPACE();
+    ```
+  </Step>
+  <Step title="Enable dynamic dispatch">
+    Add three lines to compile your function for all available targets and dispatch at runtime:
+    ```cpp
+    #define HWY_TARGET_INCLUDE "your_file.cc"
+    #include "hwy/foreach_target.h"
+    #include "hwy/highway.h"
+    // ... your HWY_NAMESPACE code ...
+    HWY_EXPORT(MultiplyAdd);
+    // Call the best implementation for this CPU:
+    HWY_DYNAMIC_DISPATCH(MultiplyAdd)(a, b, c, out, count);
+    ```
+  </Step>
+  <Step title="Build with optimizations">
+    Compile with `-O2` or higher. Highway inlines aggressively — without optimization, SIMD code will be slow.
+    ```bash
+    cmake -DCMAKE_BUILD_TYPE=Release ..
+    make -j
+    ```
+  </Step>
+</Steps>
+
+## Explore the library
+
+<CardGroup cols={2}>
+  <Card title="Loop vectorization" icon="repeat" href="/guides/loop-vectorization">
+    Strategies for strip-mining loops, handling remainders, and processing partial vectors safely.
+  </Card>
+  <Card title="Dynamic dispatch guide" icon="shuffle" href="/guides/dynamic-dispatch">
+    Step-by-step guide to using foreach_target.h and HWY_DYNAMIC_DISPATCH.
+  </Card>
+  <Card title="VQSort — vectorized sort" icon="arrow-up-wide-short" href="/contrib/sort">
+    State-of-the-art vectorized quicksort for integers and floats.
+  </Card>
+  <Card title="Math functions" icon="square-root-variable" href="/contrib/math">
+    SIMD-accelerated sin, cos, exp, log, atan2, and more.
+  </Card>
+  <Card title="Porting intrinsics" icon="arrows-rotate" href="/guides/porting-intrinsics">
+    Migrate existing x86/NEON intrinsic code to portable Highway ops.
+  </Card>
+  <Card title="Design philosophy" icon="compass" href="/resources/design-philosophy">
+    Why Highway was designed the way it was, and how it compares to alternatives.
+  </Card>
+</CardGroup>
+
+<Note>
+Highway is used in production by Chromium, Firefox, JPEG XL (libjxl), TensorFlow, Numpy, gemma.cpp, libvips, and many more. See the [full list](https://github.com/google/highway#examples) on GitHub.
+</Note>
